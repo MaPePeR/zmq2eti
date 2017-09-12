@@ -31,6 +31,7 @@
 #include <string.h> //for memset
 #include <errno.h> //for errno
 #include <pthread.h> //for pthread_setschedparam
+#include <assert.h>
 
 #define RPI_V2
 #include "hw-addresses.h"
@@ -42,104 +43,77 @@
 #define CLOCK_DIVI (122)
 #define CLOCK_DIVF (72)
 
-size_t ceilToPage(size_t size) {
-    //round up to nearest page-size multiple
-    if (size & (PAGE_SIZE-1)) {
-        size += PAGE_SIZE - (size & (PAGE_SIZE-1));
-    }
-    return size;
+
+#include "mailbox.h"
+// ---- Memory mappping defines
+#define BUS_TO_PHYS(x) ((x)&~0xC0000000)
+
+// ---- Memory allocating defines
+// https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface
+#define MEM_FLAG_DIRECT           (1 << 2)
+#define MEM_FLAG_COHERENT         (2 << 2)
+#define MEM_FLAG_L1_NONALLOCATING (MEM_FLAG_DIRECT | MEM_FLAG_COHERENT)
+
+// A memory block that represents memory that is allocated in physical
+// memory and locked there so that it is not swapped out.
+// It is not backed by any L1 or L2 cache, so writing to it will directly
+// modify the physical memory (and it is slower of course to do so).
+// This is memory needed with DMA applications so that we can write through
+// with the CPU and have the DMA controller 'see' the data.
+// The UncachedMemBlock_{alloc,free,to_physical}
+// functions are meant to operate on these.
+struct UncachedMemBlock {
+  void *mem;                  // User visible value: the memory to use.
+  //-- Internal representation.
+  uint32_t bus_addr;
+  uint32_t mem_handle;
+  size_t size;
+};
+
+static int mbox_fd = -1;   // used internally by the UncachedMemBlock-functions.
+
+// Allocate a block of memory of the given size (which is rounded up to the next
+// full page). The memory will be aligned on a page boundary and zeroed out.
+static struct UncachedMemBlock UncachedMemBlock_alloc(size_t size) {
+  if (mbox_fd < 0) {
+    mbox_fd = mbox_open();
+    assert(mbox_fd >= 0);  // Uh, /dev/vcio not there ?
+  }
+  // Round up to next full page.
+  size = size % PAGE_SIZE == 0 ? size : (size + PAGE_SIZE) & ~(PAGE_SIZE - 1);
+
+  struct UncachedMemBlock result;
+  result.size = size;
+  result.mem_handle = mem_alloc(mbox_fd, size, PAGE_SIZE,
+                                MEM_FLAG_L1_NONALLOCATING);
+  result.bus_addr = mem_lock(mbox_fd, result.mem_handle);
+  result.mem = mapmem(BUS_TO_PHYS(result.bus_addr), size);
+  fprintf(stderr, "Alloc: %6d bytes;  %p (bus=0x%08x, phys=0x%08x)\n",
+          (int)size, result.mem, result.bus_addr, BUS_TO_PHYS(result.bus_addr));
+  assert(result.bus_addr);  // otherwise: couldn't allocate contiguous block.
+  memset(result.mem, 0x00, size);
+
+  return result;
 }
 
-uintptr_t virtToPhys(void* virt, int pagemapfd) {
-    uintptr_t pgNum = (uintptr_t)(virt)/PAGE_SIZE;
-    int byteOffsetFromPage = (uintptr_t)(virt)%PAGE_SIZE;
-    uint64_t physPage;
-    ///proc/self/pagemap is a uint64_t array where the index represents the virtual page number and the value at that index represents the physical page number.
-    //So if virtual address is 0x1000000, read the value at *array* index 0x1000000/PAGE_SIZE and multiply that by PAGE_SIZE to get the physical address.
-    //because files are bytestreams, one must explicitly multiply each byte index by 8 to treat it as a uint64_t array.
-    int err = lseek(pagemapfd, pgNum*8, SEEK_SET);
-    if (err != pgNum*8) {
-        printf("WARNING: virtToPhys %p failed to seek (expected %i got %i. errno: %i)\n", virt, pgNum*8, err, errno);
-    }
-    read(pagemapfd, &physPage, 8);
-    if (!physPage & (1ull<<63)) { //bit 63 is set to 1 if the page is present in ram
-        printf("WARNING: virtToPhys %p has no physical address\n", virt);
-    }
-    physPage = physPage & ~(0x1ffull << 55); //bits 55-63 are flags.
-    uintptr_t mapped = (uintptr_t)(physPage*PAGE_SIZE + byteOffsetFromPage);
-    return mapped;
-}
-
-uintptr_t virtToUncachedPhys(void *virt, int pagemapfd) {
-	//0xc0000000 was changed from 0x40000000 for RPI_V2
-    //return virtToPhys(virt, pagemapfd) | 0x40000000; //bus address of the ram is 0x40000000. With this binary-or, writes to the returned address will bypass the CPU (L1) cache, but not the L2 cache. 0xc0000000 should be the base address if L2 must also be bypassed. However, the DMA engine is aware of L2 cache - just not the L1 cache (source: http://en.wikibooks.org/wiki/Aros/Platforms/Arm_Raspberry_Pi_support#Framebuffer )
-    return virtToPhys(virt, pagemapfd) &~0xC0000000; //bus address of the ram is 0x40000000. With this binary-or, writes to the returned address will bypass the CPU (L1) cache, but not the L2 cache. 0xc0000000 should be the base address if L2 must also be bypassed. However, the DMA engine is aware of L2 cache - just not the L1 cache (source: http://en.wikibooks.org/wiki/Aros/Platforms/Arm_Raspberry_Pi_support#Framebuffer )
+// Free block previously allocated with UncachedMemBlock_alloc()
+static void UncachedMemBlock_free(struct UncachedMemBlock *block) {
+  if (block->mem == NULL) return;
+  assert(mbox_fd >= 0);  // someone should've initialized that on allocate.
+  unmapmem(block->mem, block->size);
+  mem_unlock(mbox_fd, block->mem_handle);
+  mem_free(mbox_fd, block->mem_handle);
+  block->mem = NULL;
 }
 
 
-//allocate some memory and lock it so that its physical address will never change
-void* makeLockedMem(size_t size) {
-    //void* mem = valloc(size); //memory returned by valloc is not zero'd
-    size = ceilToPage(size);
-    void *mem = mmap(
-        NULL,   //let kernel place memory where it wants
-        size,   //length
-        PROT_WRITE | PROT_READ, //ask for read and write permissions to memory
-        MAP_SHARED | 
-        MAP_ANONYMOUS | //no underlying file; initialize to 0
-        MAP_NORESERVE | //don't reserve swap space
-        MAP_LOCKED, //lock into *virtual* ram. Physical ram may still change!
-        -1,	// File descriptor
-    0); //no offset into file (file doesn't exist).
-    if (mem == MAP_FAILED) {
-        printf("makeLockedMem failed\n");
-        exit(1);
-    }
-    memset(mem, 0, size); //simultaneously zero the pages and force them into memory
-    mlock(mem, size);
-    return mem;
-}
-
-//free memory allocated with makeLockedMem
-void freeLockedMem(void* mem, size_t size) {
-    size = ceilToPage(size);
-    munlock(mem, size);
-    munmap(mem, size);
-}
-
-void* makeUncachedMemView(void* virtaddr, size_t bytes, int memfd, int pagemapfd) {
-    //by default, writing to any virtual address will go through the CPU cache.
-    //this function will return a pointer that behaves the same as virtaddr, but bypasses the CPU L1 cache (note that because of this, the returned pointer and original pointer should not be used in conjunction, else cache-related inconsistencies will arise)
-    //Note: The original memory should not be unmapped during the lifetime of the uncached version, as then the OS won't know that our process still owns the physical memory.
-    bytes = ceilToPage(bytes);
-    //first, just allocate enough *virtual* memory for the operation. This is done so that we can do the later mapping to a contiguous range of virtual memory:
-    void *mem = mmap(
-        NULL,   //let kernel place memory where it wants
-        bytes,   //length
-        PROT_WRITE | PROT_READ, //ask for read and write permissions to memory
-        MAP_SHARED | 
-        MAP_ANONYMOUS | //no underlying file; initialize to 0
-        MAP_NORESERVE | //don't reserve swap space
-        MAP_LOCKED, //lock into *virtual* ram. Physical ram may still change!
-        -1,	// File descriptor
-    0); //no offset into file (file doesn't exist).
-    //now, free the virtual memory and immediately remap it to the physical addresses used in virtaddr
-    munmap(mem, bytes); //Might not be necessary; MAP_FIXED indicates it can map an already-used page
-    for (int offset=0; offset<bytes; offset += PAGE_SIZE) {
-        void *mappedPage = mmap(mem+offset, PAGE_SIZE, PROT_WRITE|PROT_READ, MAP_SHARED|MAP_FIXED|MAP_NORESERVE|MAP_LOCKED, memfd, virtToUncachedPhys(virtaddr+offset, pagemapfd));
-        if (mappedPage != mem+offset) { //We need these mappings to be contiguous over virtual memory (in order to replicate the virtaddr array), so we must ensure that the address we requested from mmap was actually used.
-            printf("Failed to create an uncached view of memory at addr %p+0x%08x\n", virtaddr, offset);
-            exit(1);
-        }
-    }
-    memset(mem, 0, bytes); //Although the cached version might have been reset, those writes might not have made it through.
-    return mem;
-}
-
-//free memory allocated with makeLockedMem
-void freeUncachedMemView(void* mem, size_t size) {
-    size = ceilToPage(size);
-    munmap(mem, size);
+// Given a pointer to memory that is in the allocated block, return the
+// physical bus addresse needed by DMA operations.
+static uintptr_t UncachedMemBlock_to_physical(const struct UncachedMemBlock *blk,
+                                              void *p) {
+    uint32_t offset = (uint8_t*)p - (uint8_t*)blk->mem;
+    assert(offset < blk->size);   // pointer not within our block.
+    return blk->bus_addr + offset;
 }
 
 //map a physical address into our virtual address space. memfd is the file descriptor for /dev/mem
@@ -284,18 +258,10 @@ int main() {
     #define N_COMMANDS (8)
 
 	size_t srcPageBytes = sizeof(uint32_t) * N_COMMANDS;
-	void *virtSrcPageCached = makeLockedMem(srcPageBytes);
-	printf("Made locked mem: %p\n", virtSrcPageCached);
-    usleep(1000);
-    void *virtSrcPage = makeUncachedMemView(virtSrcPageCached, srcPageBytes, memfd, pagemapfd);
-    printf("%p mappedPhysSrcPage: %p\n", virtSrcPage, virtToPhys(virtSrcPage, pagemapfd));
-    usleep(1000);
 
-
+	struct UncachedMemBlock srcPage = UncachedMemBlock_alloc(srcPageBytes);
     
-    //cast virtSrcPage to a GpioBufferFrame array:
-    uint32_t *srcArray = (uint32_t*)virtSrcPage; //Note: calling virtToPhys on srcArray will return NULL. Use srcArrayCached for that.
-    uint32_t *srcArrayCached = (uint32_t*)virtSrcPageCached;
+    uint32_t *srcArray = (uint32_t*)srcPage.mem; 
 
     //Fill with data for now
     srcArray[0] = 0xFFCC5500;
@@ -316,30 +282,21 @@ int main() {
 
 	//allocate memory for the control blocks
     size_t cbPageBytes = N_COMMANDS * sizeof(struct DmaControlBlock); //3 cbs for each source block
-    void *virtCbPageCached = makeLockedMem(cbPageBytes);
-    void *virtCbPage = makeUncachedMemView(virtCbPageCached, cbPageBytes, memfd, pagemapfd);
-    //fill the control blocks:
-    struct DmaControlBlock *cbArrCached = (struct DmaControlBlock*)virtCbPageCached;
-    struct DmaControlBlock *cbArr = (struct DmaControlBlock*)virtCbPage;
+    struct UncachedMemBlock cbPage = UncachedMemBlock_alloc(cbPageBytes);
+    struct DmaControlBlock *cbArr = (struct DmaControlBlock*)cbPage.mem;
 
     printf("Generating DMA-Commands...\n");
     usleep(1000);
 
     for (int i = 0; i < N_COMMANDS; i++) {
 	    cbArr[i].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_NO_WIDE_BURSTS;
-	    cbArr[i].SOURCE_AD = virtToUncachedPhys(srcArrayCached + i, pagemapfd); //The data written doesn't matter, but using the GPIO source will hopefully bring it into L2 for more deterministic timing of the next control block.
+	    cbArr[i].SOURCE_AD = UncachedMemBlock_to_physical(&srcPage, srcArray + i);
 	    cbArr[i].DEST_AD = PWM_BASE_BUS + PWM_FIF1; //write to the FIFO
 	    cbArr[i].TXFR_LEN = DMA_CB_TXFR_LEN_XLENGTH(4);
 	    cbArr[i].STRIDE = 0;
-	    cbArr[i].NEXTCONBK = virtToUncachedPhys(cbArrCached+((i+1) % N_COMMANDS), pagemapfd); //have to use the cached version because the uncached version isn't listed in pagemap(?)
+	    cbArr[i].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, cbArr+((i+1) % N_COMMANDS));
 	}
 
-    /*cbArr[1].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_NO_WIDE_BURSTS;
-    cbArr[1].SOURCE_AD = virtToUncachedPhys(srcArrayCached + 1, pagemapfd); //The data written doesn't matter, but using the GPIO source will hopefully bring it into L2 for more deterministic timing of the next control block.
-    cbArr[1].DEST_AD = PWM_BASE_BUS + PWM_FIF1; //write to the FIFO
-    cbArr[1].TXFR_LEN = DMA_CB_TXFR_LEN_XLENGTH(4);
-    cbArr[1].STRIDE = 0;
-    cbArr[1].NEXTCONBK = virtToUncachedPhys(cbArrCached, pagemapfd); */
 	for (int i = 0; i < N_COMMANDS; i++)
 		logDmaControlBlock(cbArr + i);
 
@@ -358,13 +315,13 @@ int main() {
     
     writeBitmasked(&dmaHeader->CS, DMA_CS_END, DMA_CS_END); //clear the end flag
     dmaHeader->DEBUG = DMA_DEBUG_READ_ERROR | DMA_DEBUG_FIFO_ERROR | DMA_DEBUG_READ_LAST_NOT_SET_ERROR; // clear debug error flags
-    uint32_t firstAddr = virtToUncachedPhys(cbArrCached, pagemapfd);
+    uint32_t firstAddr = UncachedMemBlock_to_physical(&cbPage, cbArr);
     printf("starting DMA @ CONBLK_AD=0x%08x\n", firstAddr);
     dmaHeader->CONBLK_AD = firstAddr; //(uint32_t)physCbPage + ((void*)cbArr - virtCbPage); //we have to point it to the PHYSICAL address of the control block (cb1)
     dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG; //high priority (max is 7)
     dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG | DMA_CS_ACTIVE; //activate DMA. 
     
-    uint32_t last_next = 0;
+    uint32_t last_next = firstAddr;
     printf("Sleeping...\n");
    	for (int i = 0; i < 32 * 100; i++) {
     	usleep(10000);

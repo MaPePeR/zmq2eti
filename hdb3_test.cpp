@@ -11,7 +11,7 @@ constexpr const char *testdata[]= {
 #define GET_DATA(i) \
 int get_data_ ## i () { \
 	static int pos = 0; \
-	if (pos > strlen(testdata[i])) return 0; \
+	if (pos > strlen(testdata[i])) return pos++ & 1; \
 	return testdata[i][pos++] == '1'; \
 }
 

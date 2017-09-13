@@ -36,15 +36,24 @@
 #define RPI_V2
 #include "hw-addresses.h"
 #include "pwm_dma_eti_sys.h"
+/************/
+/* Settings */
+/************/
 
 #define SCHED_PRIORITY 30 //Linux scheduler priority. Higher = more realtime
 
 #define DMA_CHANNEL (5)
 #define CLOCK_DIVI (122)
 #define CLOCK_DIVF (72)
+#define BUFFER_SECONDS (3)
+//We output 2 * 2048 Bits per second onto 2 channels at 32 bit per command
+#define BUFFER_COMMANDS (BUFFER_SECONDS * 2048 * 2 * 2 / 32)
 
-
-#include "mailbox.h"
+/*************************/
+extern "C"
+{
+	#include "mailbox.h"
+}
 // ---- Memory mappping defines
 #define BUS_TO_PHYS(x) ((x)&~0xC0000000)
 
@@ -157,9 +166,9 @@ void writeBitmasked(volatile uint32_t *dest, uint32_t mask, uint32_t value) {
     //  writeBitmasked(&x, 0b00000110, 0b11110011),
     //  then x now = 0b11001110
     uint32_t cur = *dest;
-    uint32_t new = (cur & (~mask)) | (value & mask);
-    *dest = new;
-    *dest = new; //best to be safe when crossing memory boundaries
+    uint32_t new_dest = (cur & (~mask)) | (value & mask);
+    *dest = new_dest;
+    *dest = new_dest; //best to be safe when crossing memory boundaries
 }
 
 void logDmaChannelHeader(struct DmaChannelHeader *h) {
@@ -187,7 +196,51 @@ void cleanupAndExit(int sig) {
     printf("Exiting with error; caught signal: %i\n", sig);
     exit(1);
 }
+int get_next_data_bit() {
+	static int count = 0;
+	count = (count + 1) & 1;
+	return 1;
+}
 
+int get_next_HDB3() {
+	static int output_pattern_pos = 0;
+	static enum {ZZZZ=0x00,PZZP=0x09,NZZN=0x19,ZZZP=0x01,ZZZN=0x11} output_pattern = ZZZZ;
+	static int current_zero_count = 0;
+	static int last_one_negative = 1;
+	static int odd_pairs = 0;
+
+	while (output_pattern_pos == 0) {
+		int next_bit = get_next_data_bit();
+		if (next_bit) {
+			output_pattern = last_one_negative ? ZZZP : ZZZN;
+			output_pattern_pos = 1<<current_zero_count;
+			current_zero_count = 0;
+			odd_pairs = !odd_pairs;
+		} else {
+			current_zero_count += 1;
+			if (current_zero_count == 4) {
+				if (odd_pairs) {
+					output_pattern = last_one_negative ? ZZZN : ZZZP;
+					output_pattern_pos = 1<<3;
+				} else {
+					output_pattern = last_one_negative ? NZZN : PZZP;
+					output_pattern_pos = 1<<3;
+				}
+				current_zero_count = 0;
+				odd_pairs = 0;
+			}
+		}
+	}
+	assert (output_pattern_pos > 0);
+	int isnz = output_pattern & output_pattern_pos > 0;
+	output_pattern_pos >>= 1;
+	if (isnz) {
+		last_one_negative = (output_pattern & 0x10) > 0;
+		return last_one_negative ? -1 : 1;
+	} else {
+		return 0;
+	}
+}
 
 int main() {
 	//Setup peripherals
@@ -236,7 +289,7 @@ int main() {
     pwmHeader->STA = PWM_STA_ERRS; //clear PWM errors
     usleep(100);
     
-    pwmHeader->DMAC = PWM_DMAC_EN | PWM_DMAC_DREQ(1) | PWM_DMAC_PANIC(1); //DREQ is activated at queue < PWM_FIFO_SIZE
+    pwmHeader->DMAC = PWM_DMAC_EN | PWM_DMAC_DREQ(7) | PWM_DMAC_PANIC(7); //DREQ is activated at queue < PWM_FIFO_SIZE
     pwmHeader->RNG1 = 32; 
     pwmHeader->RNG2 = 32; 
     pwmHeader->CTL =  PWM_CTL_ENABLE1 | PWM_CTL_USEFIFO1 | PWM_CTL_SERIAL1 |
@@ -255,50 +308,35 @@ int main() {
     printf("Allocating locked memory\n");
     usleep(1000);
 
-    #define N_COMMANDS (8)
-
-	size_t srcPageBytes = sizeof(uint32_t) * N_COMMANDS;
+	size_t srcPageBytes = sizeof(uint32_t) * BUFFER_COMMANDS;
 
 	struct UncachedMemBlock srcPage = UncachedMemBlock_alloc(srcPageBytes);
     
     uint32_t *srcArray = (uint32_t*)srcPage.mem; 
 
-    //Fill with data for now
-    srcArray[0] = 0xFFCC5500;
-    srcArray[2] = 0x00000000;
-    srcArray[4] = 0x00000000;
-    srcArray[6] = 0x00000000;
-    //srcArray[1] = 0x55555555;
-    //srcArray[0] = 0xFFFFFFFF;
-    //srcArray[1] = 0x00000000;
-    srcArray[1] = 0xCCCCCCCC;
-    srcArray[3] = 0x00000000;
-    srcArray[5] = 0x00000000;
-    srcArray[7] = 0x00000000;
-
-
-    //pwmHeader->FIF1 = 16;
-    //pwmHeader->FIF1 = 16;
+    memset(srcPage.mem, 0, srcPageBytes); //Just make sure its 0ed.
 
 	//allocate memory for the control blocks
-    size_t cbPageBytes = N_COMMANDS * sizeof(struct DmaControlBlock); //3 cbs for each source block
+    size_t cbPageBytes = BUFFER_COMMANDS * sizeof(struct DmaControlBlock); //3 cbs for each source block
     struct UncachedMemBlock cbPage = UncachedMemBlock_alloc(cbPageBytes);
     struct DmaControlBlock *cbArr = (struct DmaControlBlock*)cbPage.mem;
+
+    printf("Memory:\n  Data-Buffer-Size: %10zd Bytes\n  Command-Buffer-Size: %10zd Bytes\n", srcPageBytes, cbPageBytes);
 
     printf("Generating DMA-Commands...\n");
     usleep(1000);
 
-    for (int i = 0; i < N_COMMANDS; i++) {
+    for (int i = 0; i < BUFFER_COMMANDS; i++) {
 	    cbArr[i].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_NO_WIDE_BURSTS;
 	    cbArr[i].SOURCE_AD = UncachedMemBlock_to_physical(&srcPage, srcArray + i);
 	    cbArr[i].DEST_AD = PWM_BASE_BUS + PWM_FIF1; //write to the FIFO
 	    cbArr[i].TXFR_LEN = DMA_CB_TXFR_LEN_XLENGTH(4);
 	    cbArr[i].STRIDE = 0;
-	    cbArr[i].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, cbArr+((i+1) % N_COMMANDS));
+	    cbArr[i].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, cbArr+((i+1) % BUFFER_COMMANDS));
 	}
 
-	for (int i = 0; i < N_COMMANDS; i++)
-		logDmaControlBlock(cbArr + i);
+	//for (int i = 0; i < BUFFER_COMMANDS; i++)
+//		logDmaControlBlock(cbArr + i);
 
     //TODO: Start DMA
     printf("Stopping DMA\n");
@@ -321,15 +359,30 @@ int main() {
     dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG; //high priority (max is 7)
     dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG | DMA_CS_ACTIVE; //activate DMA. 
     
-    uint32_t last_next = firstAddr;
-    printf("Sleeping...\n");
-   	for (int i = 0; i < 32 * 100; i++) {
-    	usleep(10000);
-    	uint32_t current = dmaHeader->NEXTCONBK;
-    	if (last_next != current) {
-    		printf("Pos: %p\n", current);
-    		last_next = current;
+    int command_index = 0;
+    while(1) {
+    	uint32_t last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + command_index);
+    	int nextHDB3;
+    	uint32_t out_p = 0;
+    	uint32_t out_m = 0;
+    	for (int i = 0; i < 16; i++) {
+    		int hdb3 = get_next_HDB3();
+    		out_p <<= 2;
+    		out_m <<= 2;
+    		out_p |= hdb3 > 0 ? 1 : 0;
+    		out_m |= hdb3 < 0 ? 1 : 0;
     	}
+    	while(dmaHeader->CONBLK_AD == last_next) {
+    		usleep(10000);
+    	}
+    	srcArray[command_index] = out_p;
+    	last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + command_index + 1);
+
+    	while(dmaHeader->CONBLK_AD == last_next) {
+    	}
+
+		srcArray[command_index + 1] = out_m;
+    	command_index = (command_index + 2) % BUFFER_COMMANDS;
     }
 
     printf("Cleanup...\n");

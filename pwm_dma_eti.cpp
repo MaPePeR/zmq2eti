@@ -32,11 +32,13 @@
 #include <errno.h> //for errno
 #include <pthread.h> //for pthread_setschedparam
 #include <assert.h>
+#include <zmq.h>
 
 #define RPI_V2
 #include "hw-addresses.h"
 #include "pwm_dma_eti_sys.h"
 #include "hdb3.h"
+#include "odr-dabOutput.h"
 /************/
 /* Settings */
 /************/
@@ -180,6 +182,13 @@ void logDmaControlBlock(struct DmaControlBlock *b) {
     printf("Dma Control Block:\n TI: 0x%08x\n SOURCE_AD: 0x%08x\n DEST_AD: 0x%08x\n TXFR_LEN: 0x%08x\n STRIDE: 0x%08x\n NEXTCONBK: 0x%08x\n unused: 0x%08x %08x\n", b->TI, b->SOURCE_AD, b->DEST_AD, b->TXFR_LEN, b->STRIDE, b->NEXTCONBK, b->_reserved[0], b->_reserved[1]);
 }
 
+#define ZMQ_MESSAGE_BUFFER_SIZE (3)
+void *zmq_ctx;
+void *zmq_sock;
+zmq_dab_message_t zmq_msg_buffer[ZMQ_MESSAGE_BUFFER_SIZE];
+int zmq_msg_buffer_count = 0;
+int zmq_msg_buffer_pos = 0;
+
 void cleanup() {
     printf("Cleanup\n");
     //disable DMA. Otherwise, it will continue to run in the background, potentially overwriting future user data.
@@ -189,6 +198,9 @@ void cleanup() {
         writeBitmasked(&dmaHeader->CS, DMA_CS_RESET, DMA_CS_RESET);
     }
     pwmHeader->CTL = 0;
+    if (zmq_ctx) {
+    	zmq_term(zmq_ctx);
+    }
     //could also disable PWM, but that's not imperative.
 }
 
@@ -197,13 +209,11 @@ void cleanupAndExit(int sig) {
     printf("Exiting with error; caught signal: %i\n", sig);
     exit(1);
 }
-int get_next_data_bit() {
-	static int count = 0;
-	count = (count + 1) & 1;
-	return 1;
-}
 
-int main() {
+
+
+
+int main(int argc, const char *argv[]) {
 	//Setup peripherals
     volatile uint32_t *gpio, *dmaBaseMem, *pwmBaseMem, *timerBaseMem, *clockBaseMem;
     //emergency clean-up:
@@ -214,6 +224,23 @@ int main() {
         sigaction(i, &sa, NULL);
     }
     setSchedPriority(SCHED_PRIORITY);
+    zmq_ctx = zmq_init(1);
+    if (!zmq_ctx) {
+    	fprintf(stderr, "%s\n", "Error initializing zmq_ctx.");
+    	exit(1);
+    }
+    zmq_sock = zmq_socket(zmq_ctx, ZMQ_SUB);
+    if (!zmq_sock) {
+    	fprintf(stderr, "%s\n", "Error creating zmq_socket.");
+    	exit(1);
+    }
+    if (zmq_connect(zmq_sock, argv[1]) < 0) {
+    	fprintf(stderr, "Failed to connect to zmq-endpoint %s\n", argv[1]);
+    	exit(1);
+    }
+    int rc = zmq_setsockopt (zmq_sock, ZMQ_SUBSCRIBE, "", 0);
+	assert (rc == 0);
+
     //First, open the linux device, /dev/mem
     //dev/mem provides access to the physical memory of the entire processor+ram
     //This is needed because Linux uses virtual memory, thus the process's memory at 0x00000000 will NOT have the same contents as the physical memory at 0x00000000
@@ -320,9 +347,85 @@ int main() {
     dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG; //high priority (max is 7)
     dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG | DMA_CS_ACTIVE; //activate DMA. 
     
+    HDB3Context hdb3 = HDB3Context();
     int command_index = 0;
+
+    int output_pos = 0;
+	uint32_t out_p = 0;
+	uint32_t out_m = 0;
+
     while(1) {
-    	uint32_t last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + command_index);
+    	//For ZMQ-Message in Message-Queue:
+    		//For ETI-Frame in ZMQ-Message:
+    			//For Byte in ETI-Frame:
+    				//For Bit in Byte:
+    					//Calculate HDB3
+    					//For 32 Bit block of Output bytes
+    						//When waiting: Try to read next ZMQ-Message
+    	if (zmq_msg_buffer_count == 0) {
+    		zmq_msg_buffer_pos = 0;
+    		rc = zmq_recv(zmq_sock, &zmq_msg_buffer[zmq_msg_buffer_pos], sizeof(*zmq_msg_buffer), 0);
+    		assert(rc <= sizeof(*zmq_msg_buffer));
+    	} else {
+    		zmq_msg_buffer_pos = (zmq_msg_buffer_pos + 1) % ZMQ_MESSAGE_BUFFER_SIZE;
+    	}
+    	zmq_dab_message_t *dab_msg = zmq_msg_buffer[zmq_msg_buffer_pos];
+
+    	int frame_offset = 0;
+    	for (int frame = 0; frame < NUM_FRAMES_PER_ZMQ_MESSAGE; frame++) {
+    		for (int frame_byte = 0; frame_byte < 6144; frame_byte++) {
+    			uint8_t byte_data;
+    			if (frame_byte < dab_msg->buflen[frame]) {
+					byte_data = dab_msg->buf[frame_offset + frame_byte];
+    			} else {
+    				byte_data = 0x55; //Frame-Padding for ETI
+    			}
+    			uint8_t byte_data_mask = 1<<7;
+    			while (byte_data_mask > 0) {
+    				bool bit_data = (byte_data & byte_data_mask) > 0;
+    				while(hdb3.hasOutput()) {
+    					int hdb3_out = hdb3.getOutput();
+    					out_p =(out_p << 2) | (hdb3_out > 0 ? 1 : 0);
+    					out_m =(out_m << 2) | (hdb3_out < 0 ? 1 : 0);
+    					output_pos += 2;
+    					if (output_pos == 32) {
+    						uint32_t last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + command_index);
+    						while(dmaHeader->CONBLK_AD == last_next) {
+    							if (zmq_msg_buffer_count < ZMQ_MESSAGE_BUFFER_SIZE) {
+    								int next_free_buffer_index = (zmq_msg_buffer_pos + zmq_msg_buffer_count) % ZMQ_MESSAGE_BUFFER_SIZE;
+						    		rc = zmq_recv(zmq_sock, &zmq_msg_buffer[zmq_msg_buffer_pos], sizeof(*zmq_msg_buffer), 0);
+						    		if (rc > 0) {
+						    			assert(rc <= sizeof(*zmq_msg_buffer));
+						    			zmq_msg_buffer_count += 1;
+						    		}
+    							}
+					    		usleep(10000);
+					    	}
+					    	srcArray[command_index] = out_p;
+					    	last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + command_index + 1);
+
+					    	while(dmaHeader->CONBLK_AD == last_next) {
+					    	}
+					    	srcArray[command_index + 1] = out_m;
+    						command_index = (command_index + 2) % BUFFER_COMMANDS;
+    						output_pos = 0;
+    					}
+    				}
+    				hdb3.inputData(bit_data);
+
+    				byte_data_mask >>= 1;
+    			}
+
+    		}
+    		frame_offset += dab_msg->buflen[frame];
+    	}
+
+
+    	zmq_msg_buffer_count--;
+
+
+
+    	/*uint32_t last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + command_index);
     	int nextHDB3;
     	uint32_t out_p = 0;
     	uint32_t out_m = 0;
@@ -343,7 +446,7 @@ int main() {
     	}
 
 		srcArray[command_index + 1] = out_m;
-    	command_index = (command_index + 2) % BUFFER_COMMANDS;
+    	command_index = (command_index + 2) % BUFFER_COMMANDS;*/
     }
 
     printf("Cleanup...\n");

@@ -1,6 +1,22 @@
 #pragma once
 #include <assert.h>
 
+class HDB3Context {
+public:
+	inline bool hasOutput() {
+		return true;
+	}
+	inline void inputData(bool bit) {
+
+	}
+	inline int getOutput() {
+		return 0;
+	}
+	inline void close() {
+
+	}
+};
+
 template <int (*func)()>
 int get_next_HDB3() {
 	static int output_pattern_pos = 0;

@@ -369,7 +369,7 @@ int main(int argc, const char *argv[]) {
 		} else {
 			zmq_msg_buffer_pos = (zmq_msg_buffer_pos + 1) % ZMQ_MESSAGE_BUFFER_SIZE;
 		}
-		zmq_dab_message_t *dab_msg = zmq_msg_buffer[zmq_msg_buffer_pos];
+		zmq_dab_message_t *dab_msg = &zmq_msg_buffer[zmq_msg_buffer_pos];
 
 		int frame_offset = 0;
 		for (int frame = 0; frame < NUM_FRAMES_PER_ZMQ_MESSAGE; frame++) {
@@ -393,7 +393,7 @@ int main(int argc, const char *argv[]) {
 							while(dmaHeader->CONBLK_AD == last_next) {
 								if (zmq_msg_buffer_count < ZMQ_MESSAGE_BUFFER_SIZE) {
 									int next_free_buffer_index = (zmq_msg_buffer_pos + zmq_msg_buffer_count) % ZMQ_MESSAGE_BUFFER_SIZE;
-									rc = zmq_recv(zmq_sock, &zmq_msg_buffer[zmq_msg_buffer_pos], sizeof(*zmq_msg_buffer), 0);
+									rc = zmq_recv(zmq_sock, &zmq_msg_buffer[next_free_buffer_index], sizeof(*zmq_msg_buffer), 0);
 									if (rc > 0) {
 										assert(rc <= sizeof(*zmq_msg_buffer));
 										zmq_msg_buffer_count += 1;

@@ -36,6 +36,7 @@
 #define RPI_V2
 #include "hw-addresses.h"
 #include "pwm_dma_eti_sys.h"
+#include "hdb3.h"
 /************/
 /* Settings */
 /************/
@@ -202,46 +203,6 @@ int get_next_data_bit() {
 	return 1;
 }
 
-int get_next_HDB3() {
-	static int output_pattern_pos = 0;
-	static enum {ZZZZ=0x00,PZZP=0x09,NZZN=0x19,ZZZP=0x01,ZZZN=0x11} output_pattern = ZZZZ;
-	static int current_zero_count = 0;
-	static int last_one_negative = 1;
-	static int odd_pairs = 0;
-
-	while (output_pattern_pos == 0) {
-		int next_bit = get_next_data_bit();
-		if (next_bit) {
-			output_pattern = last_one_negative ? ZZZP : ZZZN;
-			output_pattern_pos = 1<<current_zero_count;
-			current_zero_count = 0;
-			odd_pairs = !odd_pairs;
-		} else {
-			current_zero_count += 1;
-			if (current_zero_count == 4) {
-				if (odd_pairs) {
-					output_pattern = last_one_negative ? ZZZN : ZZZP;
-					output_pattern_pos = 1<<3;
-				} else {
-					output_pattern = last_one_negative ? NZZN : PZZP;
-					output_pattern_pos = 1<<3;
-				}
-				current_zero_count = 0;
-				odd_pairs = 0;
-			}
-		}
-	}
-	assert (output_pattern_pos > 0);
-	int isnz = output_pattern & output_pattern_pos > 0;
-	output_pattern_pos >>= 1;
-	if (isnz) {
-		last_one_negative = (output_pattern & 0x10) > 0;
-		return last_one_negative ? -1 : 1;
-	} else {
-		return 0;
-	}
-}
-
 int main() {
 	//Setup peripherals
     volatile uint32_t *gpio, *dmaBaseMem, *pwmBaseMem, *timerBaseMem, *clockBaseMem;
@@ -366,7 +327,7 @@ int main() {
     	uint32_t out_p = 0;
     	uint32_t out_m = 0;
     	for (int i = 0; i < 16; i++) {
-    		int hdb3 = get_next_HDB3();
+    		int hdb3 = get_next_HDB3<get_next_data_bit>();
     		out_p <<= 2;
     		out_m <<= 2;
     		out_p |= hdb3 > 0 ? 1 : 0;

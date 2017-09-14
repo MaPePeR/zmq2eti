@@ -21,7 +21,7 @@
 //  0 1
 //0 0 +
 //1 - ?
-
+#include <time.h>
 #include <sys/mman.h> //for mmap
 #include <stdio.h>
 #include <signal.h> //for sigaction
@@ -48,11 +48,13 @@
 #define DMA_CHANNEL (5)
 #define CLOCK_DIVI (122)
 #define CLOCK_DIVF (72)
-#define BUFFER_SECONDS (3)
+#define BUFFER_SECONDS (15)
 //We output 2 * 2048 Bits per second onto 2 channels at 32 bit per command
 #define BUFFER_COMMANDS (BUFFER_SECONDS * 2048 * 2 * 2 / 32)
 //One ETI-Frame lasts for 24*10**-3 Seconds, so this is approx the amount of ZNQ-Messages for a full buffer of BUFFER_SECONDS-seconds.
 #define ZMQ_MESSAGE_BUFFER_SIZE (BUFFER_SECONDS * 1000 / (24 * NUM_FRAMES_PER_ZMQ_MESSAGE))
+
+#define SLEEP_TIME (BUFFER_SECONDS / 3)
 
 
 /*************************/
@@ -371,6 +373,14 @@ int main(int argc, const char *argv[]) {
 	dmaHeader->CONBLK_AD = firstAddr; //(uint32_t)physCbPage + ((void*)cbArr - virtCbPage); //we have to point it to the PHYSICAL address of the control block (cb1)
 	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG; //high priority (max is 7)
 	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG | DMA_CS_ACTIVE; //activate DMA. 
+
+	time_t start_time = time(0);
+	for (zmq_msg_buffer_count = 0; zmq_msg_buffer_count < ZMQ_MESSAGE_BUFFER_SIZE / 2; zmq_msg_buffer_count++) {
+		rc = zmq_recv(zmq_sock, &zmq_msg_buffer[zmq_msg_buffer_count], sizeof(*zmq_msg_buffer), 0);
+		//zmq_msg_buffer_count += 1;
+		//TODO: there is a danger of running dry here.
+		assert(rc <= sizeof(*zmq_msg_buffer) && rc > 0);
+	}
 	
 	HDB3Context hdb3 = HDB3Context();
 	int command_index = -1;
@@ -378,7 +388,8 @@ int main(int argc, const char *argv[]) {
 	int output_pos = 0;
 	uint32_t out_p = 0;
 	uint32_t out_m = 0;
-
+	int last_version = 0;
+	size_t bytes = 0;
 	while(1) {
 		//For ZMQ-Message in Message-Queue:
 			//For ETI-Frame in ZMQ-Message:
@@ -393,14 +404,12 @@ int main(int argc, const char *argv[]) {
 			zmq_msg_buffer_count += 1;
 			//TODO: there is a danger of running dry here.
 			assert(rc <= sizeof(*zmq_msg_buffer) && rc > 0);
-			if (command_index < 0) {
-				//This is the first command, so we position ourself right at the DMA-Loop
-				command_index = (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(DmaControlBlock);
-				command_index = (command_index + BUFFER_COMMANDS / 2) % BUFFER_COMMANDS;
-				printf("Got first command. Starting at command=%d\n", command_index);
-			}
-		} else {
-			zmq_msg_buffer_pos = (zmq_msg_buffer_pos + 1) % ZMQ_MESSAGE_BUFFER_SIZE;
+		}
+		if (command_index < 0) {
+			//This is the first command, so we position ourself right at the DMA-Loop
+			command_index = (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(DmaControlBlock);
+			command_index = (command_index + BUFFER_COMMANDS / 2) % BUFFER_COMMANDS;
+			printf("Got first command. Starting at command=%d\n", command_index);
 		}
 		zmq_dab_message_t *dab_msg = &zmq_msg_buffer[zmq_msg_buffer_pos];
 
@@ -424,14 +433,19 @@ int main(int argc, const char *argv[]) {
 						if (output_pos == 32) {
 							uint32_t last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + command_index);
 							while(dmaHeader->CONBLK_AD == last_next) {
-								if (zmq_msg_buffer_count < ZMQ_MESSAGE_BUFFER_SIZE) {
+								//sleep(SLEEP_TIME);
+								while (zmq_msg_buffer_count < ZMQ_MESSAGE_BUFFER_SIZE) {
 									int next_free_buffer_index = (zmq_msg_buffer_pos + zmq_msg_buffer_count) % ZMQ_MESSAGE_BUFFER_SIZE;
 									rc = zmq_recv(zmq_sock, &zmq_msg_buffer[next_free_buffer_index], sizeof(*zmq_msg_buffer), ZMQ_DONTWAIT);
 									if (rc > 0) {
 										assert(rc <= sizeof(*zmq_msg_buffer));
+										printf("Got async packet\n");
 										zmq_msg_buffer_count += 1;
+									} else {
+										break;
 									}
 								}
+
 							}
 							srcArray[command_index] = out_p;
 							last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + (command_index + 1) % BUFFER_COMMANDS);
@@ -450,23 +464,32 @@ int main(int argc, const char *argv[]) {
 
 			}
 			frame_offset += dab_msg->buflen[frame];
+			bytes += 6144;
 		}
 
 
 		zmq_msg_buffer_count--;
+		
 
 		if (command_index < 2 || 1) {
 			int dma_index = (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(DmaControlBlock);
-			printf("ZMQ-Buffer: %2d DMA-Buffer: %6.2f%% %10d %10d\n", zmq_msg_buffer_count, 
+			printf("ZMQ-Buffer: %2d DMA-Buffer: %6.2f%% %10d %10d %4d\n", zmq_msg_buffer_count, 
 				((BUFFER_COMMANDS + dma_index - command_index) % BUFFER_COMMANDS) * 100.0f / BUFFER_COMMANDS,
-				command_index, dma_index);
+				command_index, dma_index, zmq_msg_buffer[zmq_msg_buffer_pos].version);
 			logPWMState(pwmHeader->STA);
 
 			if ((pwmHeader->STA & (0xF0)) > 0) {
 				printf("GAP!!!\n");
 				pwmHeader->STA = 0xF0;
 			}
+			printf("Avg-Speed: %20.3f\n", (bytes * 1.0/ (time(0) - start_time)));
+			if ((last_version + 1) % 2048 != zmq_msg_buffer[zmq_msg_buffer_pos].version) {
+				printf("LOST!!!\n");
+			}
+			last_version = zmq_msg_buffer[zmq_msg_buffer_pos].version;
+
 		}
+		zmq_msg_buffer_pos = (zmq_msg_buffer_pos + 1) % ZMQ_MESSAGE_BUFFER_SIZE;
 	}
 
 	printf("Cleanup...\n");

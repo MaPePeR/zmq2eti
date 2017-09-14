@@ -46,15 +46,16 @@ class TokenBucket(object):
 
 NUM_FRAMES_PER_ZMQ_MESSAGE = 4
 PACKET_SIZE = 6144 * NUM_FRAMES_PER_ZMQ_MESSAGE #Bytes
-DATA_RATE = 256000 #Byte/s
+#DATA_RATE = 256000 #Byte/s
+DATA_RATE = 256*1000 #Byte/s
 if __name__ == "__main__":
     data = bytearray()
-    for i in range(PACKET_SIZE):
+    for i in range(6144 * 4):
         #data.append(0b11111111)
         data.append(0b00000000)
     tb = TokenBucket(PACKET_SIZE * 4, DATA_RATE)
     # uint32_t version;uint16_t buflen[4]; uint8_t buf[NUM_FRAMES_PER_ZMQ_MESSAGE*6144];
-    packet = struct.pack("IHHHH" + str(6144 * NUM_FRAMES_PER_ZMQ_MESSAGE) + "s", 0, 6144, 6144, 6144, 6144, data)
+    
 
     print("Creating context...")
     zmq_ctx = zmq.Context.instance()
@@ -63,9 +64,12 @@ if __name__ == "__main__":
     #port = s.bind_to_random_port("tcp://*")
     s.bind("tcp://*:50473")
     print("Publishing on port %d" % 50473)
+    i = 0
     try:
         while True:
             if tb.consume(PACKET_SIZE): 
+                packet = struct.pack("IHHHH" + str(len(data)) + "s", i % 2048, 1, 1, 1, 1, data)
+                i = (i + 1) % 2048
                 s.send(packet)
             else:
                 time.sleep(24*10**-3 / 4)

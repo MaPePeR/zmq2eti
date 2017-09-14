@@ -2,6 +2,7 @@
 #include "odr-dabOutput.h"
 #include <time.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #define ZMQ_MESSAGE_BUFFER_SIZE (1)
 void *zmq_ctx;
@@ -23,6 +24,7 @@ int main(int argc, const char* argv[]) {
 		exit(1);
 	}
 	int rc = zmq_setsockopt (zmq_sock, ZMQ_SUBSCRIBE, "", 0);
+	assert (rc == 0);
 	size_t bytes = 0;
 	time_t start_time = time(0);
 	while(1) {

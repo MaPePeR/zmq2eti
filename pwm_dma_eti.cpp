@@ -33,7 +33,6 @@
 #include <pthread.h> //for pthread_setschedparam
 #include <assert.h>
 #include <zmq.h>
-#include <pthread.h>
 #include <deque>
 
 #define RPI_V2
@@ -165,7 +164,7 @@ void setSchedPriority(int priority) {
 	struct sched_param sp; 
 	sp.sched_priority=priority; 
 	int ret;
-	if (ret = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp)) {
+	if ((ret = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp))) {
 		printf("Warning: pthread_setschedparam (increase thread priority) returned non-zero: %i\n", ret);
 	}
 }
@@ -285,6 +284,7 @@ void *read_zmq_messages_thread(void *arg) {
 		printf("Terminating ZMQ-Context\n");
 		zmq_term(zmq_ctx);
 	}
+	return NULL;
 }
 
 void cleanup() {
@@ -334,7 +334,7 @@ void logPWMState(uint32_t pwmState) {
 
 int main(int argc, const char *argv[]) {
 	//Setup peripherals
-	volatile uint32_t *gpio, *dmaBaseMem, *pwmBaseMem, *timerBaseMem, *clockBaseMem;
+	volatile uint32_t *gpio, *dmaBaseMem, *pwmBaseMem, *clockBaseMem;
 	//emergency clean-up:
 	for (int i = 0; i < 64; i++) { //catch all signals (like ctrl+c, ctrl+z, ...) to ensure DMA is disabled
 		struct sigaction sa;
@@ -356,7 +356,6 @@ int main(int argc, const char *argv[]) {
 		printf("Failed to open /dev/mem (did you remember to run as root?)\n");
 		exit(1);
 	}
-	int pagemapfd = open("/proc/self/pagemap", O_RDONLY);
 	//now map /dev/mem into memory, but only map specific peripheral sections:
 	gpio = mapPeripheral(memfd, GPIO_BASE);
 	dmaBaseMem = mapPeripheral(memfd, DMA_BASE);
@@ -373,7 +372,7 @@ int main(int argc, const char *argv[]) {
 	*(clockBaseMem + CM_PWMDIV/4) = CM_PWMDIV_PASSWD | CM_PWMDIV_DIVI(CLOCK_DIVI) | CM_PWMDIV_DIVF(CLOCK_DIVF); //configure clock divider (running at 500MHz undivided)
 	*(clockBaseMem + CM_PWMCTL/4) = CM_PWMCTL_PASSWD | CM_PWMCTL_SRC_PLLD | CM_PWMCTL_MASH(1); //source 500MHz base clock, MASH1.
 	*(clockBaseMem + CM_PWMCTL/4) = CM_PWMCTL_PASSWD | CM_PWMCTL_SRC_PLLD | CM_PWMCTL_ENAB | CM_PWMCTL_MASH(1); //enable clock
-	do {} while (*(clockBaseMem + CM_PWMCTL/4) & CM_PWMCTL_BUSY == 0); //wait for clock to activate
+	do {} while ((*(clockBaseMem + CM_PWMCTL/4) & CM_PWMCTL_BUSY) == 0); //wait for clock to activate
 
 	printf("setting up PWM\n");
 	//Setup PWM
@@ -462,8 +461,8 @@ int main(int argc, const char *argv[]) {
 	int output_pos = 0;
 	uint32_t out_p = 0;
 	uint32_t out_m = 0;
-	int last_version = 0;
-	size_t bytes = 0;
+	uint32_t last_version = 0;
+	size_t bytes = filled_buffers.size() * NUM_FRAMES_PER_ZMQ_MESSAGE * 6144;
 	while(1) {
 		//For ZMQ-Message in Message-Queue:
 			//For ETI-Frame in ZMQ-Message:
@@ -550,6 +549,8 @@ int main(int argc, const char *argv[]) {
 	
 
 	cleanup();
+	UncachedMemBlock_free(&srcPage);
+	UncachedMemBlock_free(&cbPage);
 
 	return 0;
 }

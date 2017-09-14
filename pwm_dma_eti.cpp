@@ -51,6 +51,9 @@
 #define BUFFER_SECONDS (3)
 //We output 2 * 2048 Bits per second onto 2 channels at 32 bit per command
 #define BUFFER_COMMANDS (BUFFER_SECONDS * 2048 * 2 * 2 / 32)
+//One ETI-Frame lasts for 24*10**-3 Seconds, so this is approx the amount of ZNQ-Messages for a full buffer of BUFFER_SECONDS-seconds.
+#define ZMQ_MESSAGE_BUFFER_SIZE (BUFFER_SECONDS * 1000 / (24 * NUM_FRAMES_PER_ZMQ_MESSAGE))
+
 
 /*************************/
 extern "C"
@@ -182,7 +185,6 @@ void logDmaControlBlock(struct DmaControlBlock *b) {
 	printf("Dma Control Block:\n TI: 0x%08x\n SOURCE_AD: 0x%08x\n DEST_AD: 0x%08x\n TXFR_LEN: 0x%08x\n STRIDE: 0x%08x\n NEXTCONBK: 0x%08x\n unused: 0x%08x %08x\n", b->TI, b->SOURCE_AD, b->DEST_AD, b->TXFR_LEN, b->STRIDE, b->NEXTCONBK, b->_reserved[0], b->_reserved[1]);
 }
 
-#define ZMQ_MESSAGE_BUFFER_SIZE (3)
 void *zmq_ctx;
 void *zmq_sock;
 zmq_dab_message_t zmq_msg_buffer[ZMQ_MESSAGE_BUFFER_SIZE];
@@ -193,12 +195,19 @@ void cleanup() {
 	printf("Cleanup\n");
 	//disable DMA. Otherwise, it will continue to run in the background, potentially overwriting future user data.
 	if(dmaHeader) {
+		printf("Stopping DMA\n");
 		writeBitmasked(&dmaHeader->CS, DMA_CS_ACTIVE, 0);
 		usleep(100);
 		writeBitmasked(&dmaHeader->CS, DMA_CS_RESET, DMA_CS_RESET);
 	}
+	printf("Stopping PWM\n");
 	pwmHeader->CTL = 0;
+	if (zmq_sock) {
+		printf("Closing ZMQ-Socket\n");
+		zmq_close(zmq_sock);
+	}
 	if (zmq_ctx) {
+		printf("Terminating ZMQ-Context\n");
 		zmq_term(zmq_ctx);
 	}
 	//could also disable PWM, but that's not imperative.
@@ -211,7 +220,23 @@ void cleanupAndExit(int sig) {
 }
 
 
-
+void logPWMState(uint32_t pwmState) {
+	printf("PWM-STA:");
+	if (pwmState & (1 <<  0)) printf(" FULL1");
+	if (pwmState & (1 <<  1)) printf(" EMPT1");
+	if (pwmState & (1 <<  2)) printf(" WERR1");
+	if (pwmState & (1 <<  3)) printf(" RERR1");
+	if (pwmState & (1 <<  4)) printf(" GAPO1");
+	if (pwmState & (1 <<  5)) printf(" GAPO2");
+	if (pwmState & (1 <<  6)) printf(" GAPO3");
+	if (pwmState & (1 <<  7)) printf(" GAPO4");
+	if (pwmState & (1 <<  8)) printf(" BERR");
+	if (pwmState & (1 <<  9)) printf(" STA1");
+	if (pwmState & (1 << 10)) printf(" STA2");
+	if (pwmState & (1 << 11)) printf(" STA3");
+	if (pwmState & (1 << 12)) printf(" STA4");
+	printf("\n");
+}
 
 int main(int argc, const char *argv[]) {
 	//Setup peripherals
@@ -277,7 +302,7 @@ int main(int argc, const char *argv[]) {
 	pwmHeader->STA = PWM_STA_ERRS; //clear PWM errors
 	usleep(100);
 	
-	pwmHeader->DMAC = PWM_DMAC_EN | PWM_DMAC_DREQ(7) | PWM_DMAC_PANIC(7); //DREQ is activated at queue < PWM_FIFO_SIZE
+	pwmHeader->DMAC = PWM_DMAC_EN | PWM_DMAC_DREQ(1) | PWM_DMAC_PANIC(1); //DREQ is activated at queue < PWM_FIFO_SIZE
 	pwmHeader->RNG1 = 32; 
 	pwmHeader->RNG2 = 32; 
 	pwmHeader->CTL =  PWM_CTL_ENABLE1 | PWM_CTL_USEFIFO1 | PWM_CTL_SERIAL1 |
@@ -348,7 +373,7 @@ int main(int argc, const char *argv[]) {
 	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG | DMA_CS_ACTIVE; //activate DMA. 
 	
 	HDB3Context hdb3 = HDB3Context();
-	int command_index = 0;
+	int command_index = -1;
 
 	int output_pos = 0;
 	uint32_t out_p = 0;
@@ -365,7 +390,15 @@ int main(int argc, const char *argv[]) {
 		if (zmq_msg_buffer_count == 0) {
 			zmq_msg_buffer_pos = 0;
 			rc = zmq_recv(zmq_sock, &zmq_msg_buffer[zmq_msg_buffer_pos], sizeof(*zmq_msg_buffer), 0);
-			assert(rc <= sizeof(*zmq_msg_buffer));
+			zmq_msg_buffer_count += 1;
+			//TODO: there is a danger of running dry here.
+			assert(rc <= sizeof(*zmq_msg_buffer) && rc > 0);
+			if (command_index < 0) {
+				//This is the first command, so we position ourself right at the DMA-Loop
+				command_index = (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(DmaControlBlock);
+				command_index = (command_index + BUFFER_COMMANDS / 2) % BUFFER_COMMANDS;
+				printf("Got first command. Starting at command=%d\n", command_index);
+			}
 		} else {
 			zmq_msg_buffer_pos = (zmq_msg_buffer_pos + 1) % ZMQ_MESSAGE_BUFFER_SIZE;
 		}
@@ -393,20 +426,19 @@ int main(int argc, const char *argv[]) {
 							while(dmaHeader->CONBLK_AD == last_next) {
 								if (zmq_msg_buffer_count < ZMQ_MESSAGE_BUFFER_SIZE) {
 									int next_free_buffer_index = (zmq_msg_buffer_pos + zmq_msg_buffer_count) % ZMQ_MESSAGE_BUFFER_SIZE;
-									rc = zmq_recv(zmq_sock, &zmq_msg_buffer[next_free_buffer_index], sizeof(*zmq_msg_buffer), 0);
+									rc = zmq_recv(zmq_sock, &zmq_msg_buffer[next_free_buffer_index], sizeof(*zmq_msg_buffer), ZMQ_DONTWAIT);
 									if (rc > 0) {
 										assert(rc <= sizeof(*zmq_msg_buffer));
 										zmq_msg_buffer_count += 1;
 									}
 								}
-								usleep(10000);
 							}
 							srcArray[command_index] = out_p;
-							last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + command_index + 1);
+							last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + (command_index + 1) % BUFFER_COMMANDS);
 
 							while(dmaHeader->CONBLK_AD == last_next) {
 							}
-							srcArray[command_index + 1] = out_m;
+							srcArray[(command_index + 1) % BUFFER_COMMANDS] = out_m;
 							command_index = (command_index + 2) % BUFFER_COMMANDS;
 							output_pos = 0;
 						}
@@ -422,6 +454,19 @@ int main(int argc, const char *argv[]) {
 
 
 		zmq_msg_buffer_count--;
+
+		if (command_index < 2 || 1) {
+			int dma_index = (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(DmaControlBlock);
+			printf("ZMQ-Buffer: %2d DMA-Buffer: %6.2f%% %10d %10d\n", zmq_msg_buffer_count, 
+				((BUFFER_COMMANDS + dma_index - command_index) % BUFFER_COMMANDS) * 100.0f / BUFFER_COMMANDS,
+				command_index, dma_index);
+			logPWMState(pwmHeader->STA);
+
+			if ((pwmHeader->STA & (0xF0)) > 0) {
+				printf("GAP!!!\n");
+				pwmHeader->STA = 0xF0;
+			}
+		}
 	}
 
 	printf("Cleanup...\n");

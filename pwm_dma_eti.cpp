@@ -181,7 +181,37 @@ void writeBitmasked(volatile uint32_t *dest, uint32_t mask, uint32_t value) {
 }
 
 void logDmaChannelHeader(struct DmaChannelHeader *h) {
+	#if 0
 	printf("Dma Ch Header:\n CS: 0x%08x\n CONBLK_AD: 0x%08x\n TI: 0x%08x\n SOURCE_AD: 0x%08x\n DEST_AD: 0x%08x\n TXFR_LEN: %u\n STRIDE: 0x%08x\n NEXTCONBK: 0x%08x\n DEBUG: 0x%08x\n", h->CS, h->CONBLK_AD, h->TI, h->SOURCE_AD, h->DEST_AD, h->TXFR_LEN, h->STRIDE, h->NEXTCONBK, h->DEBUG);
+	#else
+	uint32_t CS = h->CS;
+	printf("Dma Ch Header:\n CS: 0x%08x\n", CS);
+
+	printf("   %1d RESET\n", (CS >> 31) & 1);
+	printf("   %1d ABORT\n", (CS >> 30) & 1);
+	printf("   %1d DISDEBUG\n", (CS >> 29) & 1);
+	printf("   %1d WAIT_FOR_OUTSTANDING_WRITES\n", (CS >> 28) & 1);
+	printf("   PANIC_PRIORITY: %d\n", (CS >> 20) & 0xF);
+	printf("   PRIORITY: %d\n",  (CS >> 16) & 0xF);
+	printf("   %1d ERROR\n", (CS >> 8) & 1);
+	printf("   %1d WAITING_FOR_OUTSTANDING_WRITES\n", (CS >> 6) & 1);
+	printf("   %1d DREQ_STOPS_DMA\n", (CS >> 5) & 1);
+	printf("   %1d PAUSED\n", (CS >> 4) & 1);
+	printf("   %1d DREQ\n", (CS >> 3) & 1);
+	printf("   %1d ACTIVE\n", (CS >> 0) & 1);
+
+	printf(" CONBLK_AD: 0x%08x\n TI: 0x%08x\n SOURCE_AD: 0x%08x\n DEST_AD: 0x%08x\n TXFR_LEN: %u\n STRIDE: 0x%08x\n NEXTCONBK: 0x%08x\n", h->CONBLK_AD, h->TI, h->SOURCE_AD, h->DEST_AD, h->TXFR_LEN, h->STRIDE, h->NEXTCONBK);
+	uint32_t DEBUG = h->DEBUG;
+	printf(" DEBUG: 0x%08x\n", DEBUG);
+	printf("   %1d LITE\n", (DEBUG >> 28) & 1);
+	printf("   VERSION: %d\n",  (DEBUG >> 25) & 0x7);
+	printf("   DMA_STATE: %d\n",  (DEBUG >> 16) & 0x1FF);
+	printf("   DMA_ID: %d\n",  (DEBUG >> 8) & 0xFF);
+	printf("   OUTSTANDING_WRITES: %d\n",  (DEBUG >> 4) & 0xF);
+	printf("   %1d READ_ERROR\n", (DEBUG >> 2) & 1);
+	printf("   %1d FIFO_ERROR\n", (DEBUG >> 1) & 1);
+	printf("   %1d READ_LAST_NOT_SET_ERROR\n", (DEBUG >> 0) & 1);
+	#endif
 }
 
 void logDmaControlBlock(struct DmaControlBlock *b) {

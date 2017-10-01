@@ -492,7 +492,10 @@ int main(int argc, const char *argv[]) {
 	uint32_t out_p = 0;
 	uint32_t out_m = 0;
 	uint32_t last_version = 0;
-	size_t bytes = filled_buffers.size() * NUM_FRAMES_PER_ZMQ_MESSAGE * 6144;
+	uint32_t gap_counter = 0;
+	size_t bytes = 0;
+	time_t last_info_msg = time(0);
+	time_t last_gap = last_info_msg;
 	while(1) {
 		//For ZMQ-Message in Message-Queue:
 			//For ETI-Frame in ZMQ-Message:
@@ -508,6 +511,7 @@ int main(int argc, const char *argv[]) {
 			command_index = (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(DmaControlBlock);
 			command_index = (command_index + BUFFER_COMMANDS / 2) % BUFFER_COMMANDS;
 			printf("Got first command. Starting at command=%d\n", command_index);
+			start_time = time(0);
 		}
 
 		int frame_offset = 0;
@@ -551,23 +555,34 @@ int main(int argc, const char *argv[]) {
 			bytes += 6144;
 		}
 
+		if ((last_version + 1) % 2048 != dab_msg->version) {
+			printf("LOST!!!\n");
+		}
+		last_version = dab_msg->version;
 
-		if (command_index < 2 || 1) {
+		time_t now = time(0);
+
+		if ((pwmHeader->STA & (0xF0)) > 0) {
+			printf("GAP!!!\n");
+			pwmHeader->STA = 0xF0;
+			gap_counter++;
+			last_gap = now;
+		}
+
+		
+		if (now > last_info_msg) {
+			last_info_msg = now;
 			int dma_index = (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(DmaControlBlock);
-			printf("ZMQ-Buffer: %2d DMA-Buffer: %6.2f%% %10d %10d %4d\n", filled_buffers.size(), 
+			printf("ZMQ-Buffer: %2d DMA-Buffer: %6.2f%% %5d %5d %4d gaps: %u %lds\n", filled_buffers.size(), 
 				((BUFFER_COMMANDS + dma_index - command_index) % BUFFER_COMMANDS) * 100.0f / BUFFER_COMMANDS,
-				command_index, dma_index, dab_msg->version);
+				command_index, dma_index, dab_msg->version,
+				gap_counter, now - last_gap);
+			printf("Runtime: %lds\n", (now - start_time));
 			logPWMState(pwmHeader->STA);
 
-			if ((pwmHeader->STA & (0xF0)) > 0) {
-				printf("GAP!!!\n");
-				pwmHeader->STA = 0xF0;
-			}
+
 			printf("Avg-Speed: %20.3f\n", (bytes * 1.0/ (time(0) - start_time)));
-			if ((last_version + 1) % 2048 != dab_msg->version) {
-				printf("LOST!!!\n");
-			}
-			last_version = dab_msg->version;
+
 
 		}
 	}

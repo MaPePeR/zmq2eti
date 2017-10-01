@@ -480,8 +480,8 @@ int main(int argc, const char *argv[]) {
 	uint32_t firstAddr = UncachedMemBlock_to_physical(&cbPage, cbArr);
 	printf("starting DMA @ CONBLK_AD=0x%08x\n", firstAddr);
 	dmaHeader->CONBLK_AD = firstAddr; //(uint32_t)physCbPage + ((void*)cbArr - virtCbPage); //we have to point it to the PHYSICAL address of the control block (cb1)
-	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG; //high priority (max is 7)
-	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(7) | DMA_CS_DISDEBUG | DMA_CS_ACTIVE; //activate DMA. 
+	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_DISDEBUG; //high priority (max is 7)
+	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_DISDEBUG | DMA_CS_ACTIVE; //activate DMA. 
 
 	time_t start_time = time(0);
 	

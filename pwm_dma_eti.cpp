@@ -407,7 +407,7 @@ int main(int argc, const char *argv[]) {
 	printf("setting up PWM\n");
 	//Setup PWM
 	pwmHeader->DMAC = 0; //disable DMA
-	pwmHeader->CTL |= PWM_CTL_CLRFIFO; //clear pwm
+	pwmHeader->CTL = PWM_CTL_CLRFIFO; //clear pwm
 	usleep(100);
 	
 	pwmHeader->STA = PWM_STA_ERRS; //clear PWM errors

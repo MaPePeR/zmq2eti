@@ -534,6 +534,7 @@ int main(int argc, const char *argv[]) {
 						if (output_pos == 32) {
 							uint32_t last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + command_index);
 							while(dmaHeader->CONBLK_AD == last_next) {
+								usleep(1500);
 							}
 							srcArray[command_index] = out_p;
 							last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + (command_index + 1) % BUFFER_COMMANDS);

@@ -51,7 +51,8 @@
 //flags used in the DmaChannelHeader struct:
 #define DMA_CS_RESET (1<<31)
 #define DMA_CS_ABORT (1<<30)
-#define DMA_CS_DISDEBUG (1<<28) //DMA will not stop when debug signal is asserted
+#define DMA_CS_DISDEBUG (1<<29) //DMA will not stop when debug signal is asserted
+#define DMA_CS_WAIT_FOR_OUTSTANDING_WRITES (1<<28) //DMA will not stop when debug signal is asserted
 #define DMA_CS_PRIORITY(x) ((x)&0xf << 16) //higher priority DMA transfers are serviced first, it would appear
 #define DMA_CS_PRIORITY_MAX DMA_CS_PRIORITY(7)
 #define DMA_CS_PANIC_PRIORITY(x) ((x)&0xf << 20)
@@ -74,6 +75,7 @@
 #define DMA_CB_TI_SRC_INC     (1<<8)
 #define DMA_CB_TI_DEST_DREQ   (1<<6)
 #define DMA_CB_TI_DEST_INC    (1<<4)
+#define DMA_CB_TI_WAIT_RESP   (1<<3)
 #define DMA_CB_TI_TDMODE      (1<<1)
 
 

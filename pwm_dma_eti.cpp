@@ -451,7 +451,8 @@ int main(int argc, const char *argv[]) {
 	usleep(1000);
 
 	for (int i = 0; i < BUFFER_COMMANDS; i++) {
-		cbArr[i].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_NO_WIDE_BURSTS;
+		//printf("DMA-Control-Block-Adress: %5d %p %d\n", i, &cbArr[i], (uint32_t)(&cbArr[i]) & 0x31);
+		cbArr[i].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_NO_WIDE_BURSTS | DMA_CB_TI_WAIT_RESP;
 		cbArr[i].SOURCE_AD = UncachedMemBlock_to_physical(&srcPage, srcArray + i);
 		cbArr[i].DEST_AD = PWM_BASE_BUS + PWM_FIF1; //write to the FIFO
 		cbArr[i].TXFR_LEN = DMA_CB_TXFR_LEN_XLENGTH(4);
@@ -480,8 +481,8 @@ int main(int argc, const char *argv[]) {
 	uint32_t firstAddr = UncachedMemBlock_to_physical(&cbPage, cbArr);
 	printf("starting DMA @ CONBLK_AD=0x%08x\n", firstAddr);
 	dmaHeader->CONBLK_AD = firstAddr; //(uint32_t)physCbPage + ((void*)cbArr - virtCbPage); //we have to point it to the PHYSICAL address of the control block (cb1)
-	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_DISDEBUG; //high priority (max is 7)
-	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_DISDEBUG | DMA_CS_ACTIVE; //activate DMA. 
+	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_DISDEBUG | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES; //high priority (max is 7)
+	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_DISDEBUG | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES | DMA_CS_ACTIVE; //activate DMA. 
 
 	time_t start_time = time(0);
 	

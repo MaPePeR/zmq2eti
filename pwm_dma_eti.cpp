@@ -413,7 +413,7 @@ int main(int argc, const char *argv[]) {
 	pwmHeader->STA = PWM_STA_ERRS; //clear PWM errors
 	usleep(100);
 	
-	pwmHeader->DMAC = PWM_DMAC_EN | PWM_DMAC_DREQ(1) | PWM_DMAC_PANIC(1); //DREQ is activated at queue < PWM_FIFO_SIZE
+	pwmHeader->DMAC = PWM_DMAC_EN | PWM_DMAC_DREQ(4) | PWM_DMAC_PANIC(4); //DREQ is activated at queue < PWM_FIFO_SIZE
 	pwmHeader->RNG1 = 32; 
 	pwmHeader->RNG2 = 32; 
 	pwmHeader->CTL =  PWM_CTL_ENABLE1 | PWM_CTL_USEFIFO1 | PWM_CTL_SERIAL1 |

@@ -398,11 +398,18 @@ int main(int argc, const char *argv[]) {
 	printf("setting up clock for pwm\n");
 	//Setup Clock for PWM
 	*(clockBaseMem + CM_PWMCTL/4) = CM_PWMCTL_PASSWD | ((*(clockBaseMem + CM_PWMCTL/4))&(~CM_PWMCTL_ENAB)); //disable clock
+	//*(clockBaseMem + CM_GP0CTL/4) = CM_PWMCTL_PASSWD | ((*(clockBaseMem + CM_GP0CTL/4))&(~CM_PWMCTL_ENAB)); //Do the same for GPIO-Clock0
 	do {} while (*(clockBaseMem + CM_PWMCTL/4) & CM_PWMCTL_BUSY); //wait for clock to deactivate
+	//do {} while (*(clockBaseMem + CM_GP0CTL/4) & CM_PWMCTL_BUSY); 
 	*(clockBaseMem + CM_PWMDIV/4) = CM_PWMDIV_PASSWD | CM_PWMDIV_DIVI(CLOCK_DIVI) | CM_PWMDIV_DIVF(CLOCK_DIVF); //configure clock divider (running at 500MHz undivided)
+	//*(clockBaseMem + CM_GP0DIV/4) = CM_PWMDIV_PASSWD | CM_PWMDIV_DIVI(CLOCK_DIVI) | CM_PWMDIV_DIVF(CLOCK_DIVF); 
 	*(clockBaseMem + CM_PWMCTL/4) = CM_PWMCTL_PASSWD | CM_PWMCTL_SRC_PLLD | CM_PWMCTL_MASH(1); //source 500MHz base clock, MASH1.
+	//*(clockBaseMem + CM_GP0CTL/4) = CM_PWMCTL_PASSWD | CM_PWMCTL_SRC_PLLD | CM_PWMCTL_MASH(1); 
 	*(clockBaseMem + CM_PWMCTL/4) = CM_PWMCTL_PASSWD | CM_PWMCTL_SRC_PLLD | CM_PWMCTL_ENAB | CM_PWMCTL_MASH(1); //enable clock
+	//*(clockBaseMem + CM_GP0CTL/4) = CM_PWMCTL_PASSWD | CM_PWMCTL_SRC_PLLD | CM_PWMCTL_ENAB | CM_PWMCTL_MASH(1); //TODO: Enable clocks with DMA to control offset between clocks?
+	
 	do {} while ((*(clockBaseMem + CM_PWMCTL/4) & CM_PWMCTL_BUSY) == 0); //wait for clock to activate
+	//do {} while ((*(clockBaseMem + CM_GP0CTL/4) & CM_PWMCTL_BUSY) == 0); //wait for clock to activate
 
 	printf("setting up PWM\n");
 	//Setup PWM
@@ -427,6 +434,8 @@ int main(int argc, const char *argv[]) {
 	//INP_GPIO(13);
 	//OUT_GPIO(13);
 	SET_GPIO_ALT(13,0); //GPIO13 = PIN33
+
+	//SET_GPIO_ALT(4,0); //Enable GPIO-Clock
 
 	//Setup DMA
 	printf("Allocating locked memory\n");

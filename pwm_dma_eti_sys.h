@@ -120,6 +120,8 @@
 #define PWM_DMAC_DREQ(D) (((D)&0xff)<<0)
 
 //The following is undocumented :( Taken from http://www.scribd.com/doc/127599939/BCM2835-Audio-clocks
+#define CM_GP0CTL 0x70
+#define CM_GP0DIV 0x74
 #define CM_PWMCTL 0xa0
 #define CM_PWMDIV 0xa4
 //each write to CM_PWMTL and CM_PWMDIV requires the password to be written:

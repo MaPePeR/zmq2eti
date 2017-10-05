@@ -72,6 +72,7 @@
 #define DMA_CB_TI_PERMAP_PWM  (5<<16)
 //...
 #define DMA_CB_TI_SRC_DREQ    (1<<10)
+#define DMA_CB_TI_SRC_WIDTH   (1<<9)
 #define DMA_CB_TI_SRC_INC     (1<<8)
 #define DMA_CB_TI_DEST_DREQ   (1<<6)
 #define DMA_CB_TI_DEST_INC    (1<<4)

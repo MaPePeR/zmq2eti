@@ -40,6 +40,8 @@
 #include "pwm_dma_eti_sys.h"
 #include "hdb3.h"
 #include "odr-dabOutput.h"
+
+#include "hdb3encodechain.hpp"
 /************/
 /* Settings */
 /************/
@@ -155,6 +157,7 @@ volatile uint32_t* mapPeripheral(int memfd, int addr) {
 }
 
 
+volatile uint32_t *gpio;
 struct DmaChannelHeader *dmaHeader; //must be global for cleanup()
 struct PwmHeader *pwmHeader;
 struct ClockManagerHeader *cmHeader;
@@ -363,9 +366,177 @@ void logPWMState(uint32_t pwmState) {
 	printf("\n");
 }
 
+class EncodedHDB3WordConsumer {
+protected:
+	uint64_t frame_processed;
+	uint64_t gap_counter;
+	int current_frame = -1;
+	int current_frame_index;
+	static constexpr int BUFFER_COUNT = 4;
+	static constexpr int ETI_FRAME_SIZE = 6144;
+	time_t start_time;
+	//We encode the bits at double the frequency and have 2 channels, so each ETI-Frame is encoded to 4 times its size in bytes.
+	//So each 2 bytes in the eti frame will be encoded to 2 uint32_t
+	static constexpr size_t BUFFER_BYTES_PER_FRAME = ETI_FRAME_SIZE * 2 * 2;
+	static constexpr size_t BUFFER_WORDS_PER_FRAME = ETI_FRAME_SIZE;
+
+	struct UncachedMemBlock srcPage;
+	uint32_t *srcArray;
+	struct UncachedMemBlock cbPage;
+	struct DmaControlBlock *cbArr;
+
+
+	struct ClockManagerClockHeader *pwmClock;
+	void setupClock() {
+		pwmClock = &cmHeader->PWM;
+
+		printf("setting up clock for pwm\n");
+		//Setup Clock for PWM
+		pwmClock->CTL = CM_CTL_PASSWD | ((pwmClock->CTL)&(~CM_CTL_ENAB)); //disable clock
+		do {} while (pwmClock->CTL & CM_CTL_BUSY); //wait for clock to deactivate
+		pwmClock->DIV = CM_DIV_PASSWD | CM_DIV_DIVI(CLOCK_DIVI) | CM_DIV_DIVF(CLOCK_DIVF); //configure clock divider (running at 500MHz undivided)
+		pwmClock->CTL = CM_CTL_PASSWD | CM_CTL_SRC_PLLD | CM_CTL_MASH(1); //source 500MHz base clock, MASH1.
+		pwmClock->CTL = CM_CTL_PASSWD | CM_CTL_SRC_PLLD | CM_CTL_ENAB | CM_CTL_MASH(1); //enable clock
+		
+		do {} while ((pwmClock->CTL & CM_CTL_BUSY) == 0); //wait for clock to activate
+	}
+	void setupPWM() {
+		printf("Shutting down PWM\n");
+
+		pwmHeader->DMAC = 0; //disable DMA
+		pwmHeader->CTL = PWM_CTL_CLRFIFO; //clear pwm
+		usleep(100);
+		while(pwmHeader->STA & (0x3<<9)) { printf("PWM still running..."); usleep(100);}
+		
+		pwmHeader->STA = PWM_STA_ERRS; //clear PWM errors
+		usleep(100);
+		printf("Setting up PWM\n");
+		
+		pwmHeader->DMAC = PWM_DMAC_EN | PWM_DMAC_DREQ(4) | PWM_DMAC_PANIC(4); //DREQ is activated at queue < PWM_FIFO_SIZE
+		pwmHeader->RNG1 = 32; 
+		pwmHeader->RNG2 = 32; 
+		pwmHeader->CTL =  PWM_CTL_ENABLE1 | PWM_CTL_USEFIFO1 | PWM_CTL_SERIAL1 |
+						PWM_CTL_ENABLE2 | PWM_CTL_USEFIFO2 | PWM_CTL_SERIAL2 ;
+
+		printf("Setting up GPIO18 + 13 for PWM0 and PWM1\n");
+		SET_GPIO_ALT(18,5); //GPIO18 = PIN12
+		SET_GPIO_ALT(13,0); //GPIO13 = PIN33
+	}
+	void setupDMA() {
+		srcPage = UncachedMemBlock_alloc(BUFFER_COUNT * BUFFER_BYTES_PER_FRAME);
+		srcArray = (uint32_t*)srcPage.mem;
+		memset(srcPage.mem, 0, srcPage.size); 
+
+		cbPage = UncachedMemBlock_alloc(BUFFER_COUNT * sizeof(struct DmaControlBlock));
+		cbArr = (struct DmaControlBlock*)cbPage.mem;
+
+		for (int i = 0; i < BUFFER_COUNT; i++) {
+			cbArr[i].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_SRC_INC | DMA_CB_TI_WAIT_RESP;
+			cbArr[i].SOURCE_AD = UncachedMemBlock_to_physical(&srcPage, ((uint8_t*)srcArray) + i * BUFFER_BYTES_PER_FRAME);
+			cbArr[i].DEST_AD = PWM_BASE_BUS + PWM_FIF1; //write to the FIFO
+			cbArr[i].TXFR_LEN = BUFFER_BYTES_PER_FRAME;
+			cbArr[i].STRIDE = 0;
+			cbArr[i].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, cbArr+((i+1) % BUFFER_COUNT));
+		}
+
+		printf("Previous DMA header:\n");
+		logDmaChannelHeader(dmaHeader);
+
+		printf("Stopping DMA\n");
+		dmaHeader->NEXTCONBK = 0;
+		dmaHeader->CS |= DMA_CS_ABORT; //make sure to disable dma first.
+		usleep(100); //give time for the abort command to be handled.
+
+		dmaHeader->CS = DMA_CS_RESET;
+		usleep(1100);
+
+		writeBitmasked(&dmaHeader->CS, DMA_CS_END, DMA_CS_END); //clear the end flag
+		usleep(100);
+
+		dmaHeader->DEBUG = DMA_DEBUG_READ_ERROR | DMA_DEBUG_FIFO_ERROR | DMA_DEBUG_READ_LAST_NOT_SET_ERROR; // clear debug error flags
+		uint32_t firstAddr = UncachedMemBlock_to_physical(&cbPage, cbArr);
+		printf("starting DMA @ CONBLK_AD=0x%08x\n", firstAddr);
+		dmaHeader->CONBLK_AD = firstAddr; //(uint32_t)physCbPage + ((void*)cbArr - virtCbPage); //we have to point it to the PHYSICAL address of the control block (cb1)
+		dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES; //high priority (max is 7)
+		dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES | DMA_CS_ACTIVE; //activate DMA. 
+	}
+	inline void waitForCurrentFrameToEnd() {
+		//usleep(dmaHeader->TXFR_LEN * 24 * 1000 / BUFFER_BYTES_PER_FRAME);
+		usleep(24*1000);
+	}
+	inline int getCurrentDMAFrame() {
+		return (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(struct DmaControlBlock);
+	}
+public:
+	EncodedHDB3WordConsumer()  {
+		setupClock();
+		setupPWM();
+		setupDMA();
+	}
+	void consumeEncodedHdb3(uint32_t out_p, uint32_t out_m) {
+		static time_t last_info = 0;
+		if (current_frame < 0) {
+			
+			current_frame = getCurrentDMAFrame();
+			printf("Starting... %d\n", current_frame);
+			waitForCurrentFrameToEnd();
+			printf("Frame ended...\n");
+			while(current_frame == getCurrentDMAFrame()) { printf("Need to wait a little longer %d\n", current_frame);}
+			start_time = time(0);
+			current_frame_index = 0;
+		} else if (current_frame == getCurrentDMAFrame()) {
+			assert(current_frame_index == 0);
+			waitForCurrentFrameToEnd();
+			while(current_frame == getCurrentDMAFrame()) {printf("Need to wait a little longer2\n");}
+			current_frame_index = 0;
+		}
+		srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index] = out_p;
+		srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 1] = out_m;
+		current_frame_index += 2;
+		if (current_frame_index >= BUFFER_WORDS_PER_FRAME) {
+			current_frame = (current_frame + 1) % BUFFER_COUNT;
+			current_frame_index = 0;
+			frame_processed += 1;
+		}
+		time_t now = time(0);
+		if ((pwmHeader->STA & (0xF0)) > 0) {
+			//printf("GAP!!! %d\n", (pwmHeader->STA & (0xF0)) >> 4);
+			pwmHeader->STA = 0xF0;
+			gap_counter++;
+			//last_gap = now;
+		}
+
+		if (last_info != now) {
+			last_info = now;
+			printf("Runtime: %ld. %20.3f B/s gaps: %llu\n", last_info - start_time, frame_processed * 6144.0 / (last_info - start_time), gap_counter);
+		}
+	}
+
+	~EncodedHDB3WordConsumer() {
+		for(int i = 0; i < BUFFER_COUNT; i++) {
+			cbArr[i].NEXTCONBK = 0;
+		}
+		dmaHeader->NEXTCONBK = 0;
+		dmaHeader->CS |= DMA_CS_ABORT;
+		usleep(100); //give time for the abort command to be handled.
+
+		dmaHeader->CS = DMA_CS_RESET;
+
+		pwmHeader->CTL = 0;
+		pwmClock->CTL = CM_CTL_PASSWD | ((pwmClock->CTL)&(~CM_CTL_ENAB)); //disable clock
+		do {} while (pwmClock->CTL & CM_CTL_BUSY); //wait for clock to deactivate
+
+		UncachedMemBlock_free(&srcPage);
+		UncachedMemBlock_free(&cbPage);
+	}
+};
+
+typedef ETIFrameConsumer<ETIFrameBitConsumer<HDB3TertiaryConsumer<EncodedHDB3WordConsumer>>> EncodingChain;
+
+
 int main(int argc, const char *argv[]) {
 	//Setup peripherals
-	volatile uint32_t *gpio, *dmaBaseMem, *pwmBaseMem, *clockBaseMem;
+	volatile uint32_t *dmaBaseMem, *pwmBaseMem, *clockBaseMem;
 	//emergency clean-up:
 	for (int i = 0; i < 64; i++) { //catch all signals (like ctrl+c, ctrl+z, ...) to ensure DMA is disabled
 		struct sigaction sa;
@@ -396,215 +567,26 @@ int main(int argc, const char *argv[]) {
 	//timerBaseMem = mapPeripheral(memfd, TIMER_BASE);
 	clockBaseMem = mapPeripheral(memfd, CLOCK_BASE);
 	cmHeader = (struct ClockManagerHeader*)(clockBaseMem + 0x70/4);
-	struct ClockManagerClockHeader *pwmClock = &cmHeader->PWM;
 
 
-	printf("setting up clock for pwm\n");
-	//Setup Clock for PWM
-	pwmClock->CTL = CM_CTL_PASSWD | ((pwmClock->CTL)&(~CM_CTL_ENAB)); //disable clock
-	do {} while (pwmClock->CTL & CM_CTL_BUSY); //wait for clock to deactivate
-	pwmClock->DIV = CM_DIV_PASSWD | CM_DIV_DIVI(CLOCK_DIVI) | CM_DIV_DIVF(CLOCK_DIVF); //configure clock divider (running at 500MHz undivided)
-	pwmClock->CTL = CM_CTL_PASSWD | CM_CTL_SRC_PLLD | CM_CTL_MASH(1); //source 500MHz base clock, MASH1.
-	pwmClock->CTL = CM_CTL_PASSWD | CM_CTL_SRC_PLLD | CM_CTL_ENAB | CM_CTL_MASH(1); //enable clock
+	EncodingChain chain;
 	
-	do {} while ((pwmClock->CTL & CM_CTL_BUSY) == 0); //wait for clock to activate
-
-	printf("setting up PWM\n");
-	//Setup PWM
-	pwmHeader->DMAC = 0; //disable DMA
-	pwmHeader->CTL = PWM_CTL_CLRFIFO; //clear pwm
-	usleep(100);
-	
-	pwmHeader->STA = PWM_STA_ERRS; //clear PWM errors
-	usleep(100);
-	
-	pwmHeader->DMAC = PWM_DMAC_EN | PWM_DMAC_DREQ(4) | PWM_DMAC_PANIC(4); //DREQ is activated at queue < PWM_FIFO_SIZE
-	pwmHeader->RNG1 = 32; 
-	pwmHeader->RNG2 = 32; 
-	pwmHeader->CTL =  PWM_CTL_ENABLE1 | PWM_CTL_USEFIFO1 | PWM_CTL_SERIAL1 |
-					PWM_CTL_ENABLE2 | PWM_CTL_USEFIFO2 | PWM_CTL_SERIAL2 ;
-
-	printf("Setting up GPIO12 + 13 for PWM0 and PWM1\n");
-	//Setup Pins to output PWM:
-	//INP_GPIO(18);
-	//OUT_GPIO(18);
-	SET_GPIO_ALT(18,5); //GPIO12 = PIN32
-	//INP_GPIO(13);
-	//OUT_GPIO(13);
-	SET_GPIO_ALT(13,0); //GPIO13 = PIN33
-
-	//SET_GPIO_ALT(4,0); //Enable GPIO-Clock
-
-	//Setup DMA
-	printf("Allocating locked memory\n");
-	usleep(1000);
-
-	size_t srcPageBytes = sizeof(uint32_t) * BUFFER_COMMANDS;
-
-	struct UncachedMemBlock srcPage = UncachedMemBlock_alloc(srcPageBytes);
-	
-	uint32_t *srcArray = (uint32_t*)srcPage.mem; 
-
-	memset(srcPage.mem, 0, srcPageBytes); //Just make sure its 0ed.
-
-	//allocate memory for the control blocks
-	size_t cbPageBytes = BUFFER_COMMANDS * sizeof(struct DmaControlBlock); //3 cbs for each source block
-	struct UncachedMemBlock cbPage = UncachedMemBlock_alloc(cbPageBytes);
-	struct DmaControlBlock *cbArr = (struct DmaControlBlock*)cbPage.mem;
-
-	printf("Memory:\n  Data-Buffer-Size: %10zd Bytes\n  Command-Buffer-Size: %10zd Bytes\n", srcPageBytes, cbPageBytes);
-
-	printf("Generating DMA-Commands...\n");
-	usleep(1000);
-
-	for (int i = 0; i < BUFFER_COMMANDS; i++) {
-		//printf("DMA-Control-Block-Adress: %5d %p %d\n", i, &cbArr[i], (uint32_t)(&cbArr[i]) & 0x31);
-		cbArr[i].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_NO_WIDE_BURSTS | DMA_CB_TI_WAIT_RESP;
-		cbArr[i].SOURCE_AD = UncachedMemBlock_to_physical(&srcPage, srcArray + i);
-		cbArr[i].DEST_AD = PWM_BASE_BUS + PWM_FIF1; //write to the FIFO
-		cbArr[i].TXFR_LEN = DMA_CB_TXFR_LEN_XLENGTH(4);
-		cbArr[i].STRIDE = 0;
-		cbArr[i].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, cbArr+((i+1) % BUFFER_COMMANDS));
-	}
-
-	//for (int i = 0; i < BUFFER_COMMANDS; i++)
-//		logDmaControlBlock(cbArr + i);
-
-	//TODO: Start DMA
-	printf("Stopping DMA\n");
-
-	printf("Previous DMA header:\n");
-	logDmaChannelHeader(dmaHeader);
-	usleep(1000);
-
-	dmaHeader->CS |= DMA_CS_ABORT; //make sure to disable dma first.
-	usleep(100); //give time for the abort command to be handled.
-	
-	dmaHeader->CS = DMA_CS_RESET;
-	usleep(100);
-	
-	writeBitmasked(&dmaHeader->CS, DMA_CS_END, DMA_CS_END); //clear the end flag
-	dmaHeader->DEBUG = DMA_DEBUG_READ_ERROR | DMA_DEBUG_FIFO_ERROR | DMA_DEBUG_READ_LAST_NOT_SET_ERROR; // clear debug error flags
-	uint32_t firstAddr = UncachedMemBlock_to_physical(&cbPage, cbArr);
-	printf("starting DMA @ CONBLK_AD=0x%08x\n", firstAddr);
-	dmaHeader->CONBLK_AD = firstAddr; //(uint32_t)physCbPage + ((void*)cbArr - virtCbPage); //we have to point it to the PHYSICAL address of the control block (cb1)
-	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_DISDEBUG | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES; //high priority (max is 7)
-	dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_DISDEBUG | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES | DMA_CS_ACTIVE; //activate DMA. 
-
-	time_t start_time = time(0);
-	
-	HDB3Context hdb3 = HDB3Context();
-	int command_index = -1;
-
-	int output_pos = 0;
-	uint32_t out_p = 0;
-	uint32_t out_m = 0;
-	uint32_t last_version = 0;
-	uint32_t gap_counter = 0;
-	size_t bytes = 0;
-	time_t last_info_msg = time(0);
-	time_t last_gap = last_info_msg;
+	zmq_dab_message_t *dab_msg = get_next_read_buffer(false);
 	while(1) {
-		//For ZMQ-Message in Message-Queue:
-			//For ETI-Frame in ZMQ-Message:
-				//For Byte in ETI-Frame:
-					//For Bit in Byte:
-						//Calculate HDB3
-						//For 32 Bit block of Output bytes
-							//When waiting: Try to read next ZMQ-Message
-		zmq_dab_message_t *dab_msg = get_next_read_buffer(command_index >= 0);
-
-		if (command_index < 0) {
-			//This is the first command, so we position ourself right at the DMA-Loop
-			command_index = (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(DmaControlBlock);
-			command_index = (command_index + BUFFER_COMMANDS / 2) % BUFFER_COMMANDS;
-			printf("Got first command. Starting at command=%d\n", command_index);
-			start_time = time(0);
-		}
-
 		int frame_offset = 0;
 		for (int frame = 0; frame < NUM_FRAMES_PER_ZMQ_MESSAGE; frame++) {
-			for (int frame_byte = 0; frame_byte < 6144; frame_byte++) {
-				uint8_t byte_data;
-				if (frame_byte < dab_msg->buflen[frame]) {
-					byte_data = dab_msg->buf[frame_offset + frame_byte];
-				} else {
-					byte_data = 0x55; //Frame-Padding for ETI
-				}
-				uint8_t byte_data_mask = 1<<7;
-				while (byte_data_mask > 0) {
-					bool bit_data = (byte_data & byte_data_mask) > 0;
-					while(hdb3.hasOutput()) {
-						int hdb3_out = hdb3.getOutput();
-						out_p =(out_p << 2) | (hdb3_out > 0 ? 1 : 0);
-						out_m =(out_m << 2) | (hdb3_out < 0 ? 1 : 0);
-						output_pos += 2;
-						if (output_pos == 32) {
-							uint32_t last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + command_index);
-							while(dmaHeader->CONBLK_AD == last_next) {
-								usleep(1500);
-							}
-							srcArray[command_index] = out_p;
-							last_next = UncachedMemBlock_to_physical(&cbPage, cbArr + (command_index + 1) % BUFFER_COMMANDS);
-
-							while(dmaHeader->CONBLK_AD == last_next) {
-							}
-							srcArray[(command_index + 1) % BUFFER_COMMANDS] = out_m;
-							command_index = (command_index + 2) % BUFFER_COMMANDS;
-							output_pos = 0;
-						}
-					}
-					hdb3.inputData(bit_data);
-
-					byte_data_mask >>= 1;
-				}
-
-			}
+			chain.consumeETIFrame(dab_msg->buf + frame_offset, dab_msg->buflen[frame]);
 			frame_offset += dab_msg->buflen[frame];
-			bytes += 6144;
 		}
+		dab_msg = get_next_read_buffer(true);
 
-		if ((last_version + 1) % 2048 != dab_msg->version) {
-			printf("LOST!!!\n");
-		}
-		last_version = dab_msg->version;
-
-		time_t now = time(0);
-
-		if ((pwmHeader->STA & (0xF0)) > 0) {
-			printf("GAP!!!\n");
-			pwmHeader->STA = 0xF0;
-			gap_counter++;
-			last_gap = now;
-		}
-
-		
-		if (now > last_info_msg) {
-			last_info_msg = now;
-			int dma_index = (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(DmaControlBlock);
-			printf("ZMQ-Buffer: %2d DMA-Buffer: %6.2f%% %5d %5d %4d gaps: %u %lds\n", filled_buffers.size(), 
-				((BUFFER_COMMANDS + dma_index - command_index) % BUFFER_COMMANDS) * 100.0f / BUFFER_COMMANDS,
-				command_index, dma_index, dab_msg->version,
-				gap_counter, now - last_gap);
-			printf("Runtime: %lds\n", (now - start_time));
-			logPWMState(pwmHeader->STA);
-
-
-			printf("Avg-Speed: %20.3f\n", (bytes * 1.0/ (time(0) - start_time)));
-
-
-		}
 	}
 
 	printf("Cleanup...\n");
 	pwmHeader->CTL = 0;
-	pwmClock->CTL = CM_CTL_PASSWD | ((pwmClock->CTL)&(~CM_CTL_ENAB)); //disable clock
-	do {} while (pwmClock->CTL & CM_CTL_BUSY); //wait for clock to deactivate
 	
 
 	cleanup();
-	UncachedMemBlock_free(&srcPage);
-	UncachedMemBlock_free(&cbPage);
 
 	return 0;
 }

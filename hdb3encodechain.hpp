@@ -108,11 +108,3 @@ public:
 	}
 };
 
-class EncodedHDB3WordConsumer {
-public:
-	void consumeEncodedHdb3(uint32_t out_p, uint32_t out_m) {
-
-	}
-};
-
-typedef ETIFrameConsumer<ETIFrameBitConsumer<HDB3TertiaryConsumer<EncodedHDB3WordConsumer>>> EncodingChain;

@@ -368,8 +368,8 @@ void logPWMState(uint32_t pwmState) {
 
 class EncodedHDB3WordConsumer {
 protected:
-	uint64_t frame_processed;
-	uint64_t gap_counter;
+	uint64_t frame_processed = 0;
+	uint64_t gap_counter = 0;
 	int current_frame = -1;
 	int current_frame_index;
 	static constexpr int BUFFER_COUNT = 4;
@@ -461,8 +461,8 @@ protected:
 		dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES | DMA_CS_ACTIVE; //activate DMA. 
 	}
 	inline void waitForCurrentFrameToEnd() {
-		//usleep(dmaHeader->TXFR_LEN * 24 * 1000 / BUFFER_BYTES_PER_FRAME);
-		usleep(24*1000);
+		usleep(dmaHeader->TXFR_LEN * 24 * 1000 / BUFFER_BYTES_PER_FRAME);
+		//usleep(24*1000);
 	}
 	inline int getCurrentDMAFrame() {
 		return (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(struct DmaControlBlock);

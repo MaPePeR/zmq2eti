@@ -479,21 +479,25 @@ public:
 			
 			current_frame = getCurrentDMAFrame();
 			printf("Starting... %d\n", current_frame);
+			cbArr[(BUFFER_COUNT + current_frame - 1) % BUFFER_COUNT].NEXTCONBK = 0;
 			waitForCurrentFrameToEnd();
 			printf("Frame ended...\n");
 			while(current_frame == getCurrentDMAFrame()) { printf("Need to wait a little longer %d\n", current_frame);}
 			start_time = time(0);
 			current_frame_index = 0;
+			cbArr[current_frame].NEXTCONBK = 0;
 		} else if (current_frame == getCurrentDMAFrame()) {
 			assert(current_frame_index == 0);
 			waitForCurrentFrameToEnd();
 			while(current_frame == getCurrentDMAFrame()) {printf("Need to wait a little longer2\n");}
 			current_frame_index = 0;
+			cbArr[current_frame].NEXTCONBK = 0;
 		}
 		srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index] = out_p;
 		srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 1] = out_m;
 		current_frame_index += 2;
 		if (current_frame_index >= BUFFER_WORDS_PER_FRAME) {
+			cbArr[(BUFFER_COUNT + current_frame - 1) % BUFFER_COUNT].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArr[current_frame]);;
 			current_frame = (current_frame + 1) % BUFFER_COUNT;
 			current_frame_index = 0;
 			frame_processed += 1;
@@ -509,6 +513,9 @@ public:
 		if (last_info != now) {
 			last_info = now;
 			printf("Runtime: %ld. %20.3f B/s gaps: %llu\n", last_info - start_time, frame_processed * 6144.0 / (last_info - start_time), gap_counter);
+			if (dmaHeader->CONBLK_AD == 0 || dmaHeader->NEXTCONBK == 0) {
+				printf("MAX-GAP!\n");
+			}
 		}
 	}
 

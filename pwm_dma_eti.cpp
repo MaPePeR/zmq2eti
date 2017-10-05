@@ -333,6 +333,8 @@ class EncodedHDB3WordConsumer {
 protected:
 	uint64_t frame_processed = 0;
 	uint64_t gap_counter = 0;
+	int previous_cb;
+	bool hadPaddingBefore = false;
 	int current_frame = -1;
 	int current_frame_index;
 	static constexpr int BUFFER_COUNT = 40;
@@ -347,6 +349,7 @@ protected:
 	uint32_t *srcArray;
 	struct UncachedMemBlock cbPage;
 	struct DmaControlBlock *cbArr;
+	struct DmaControlBlock *cbArrPadding;
 
 
 	struct ClockManagerClockHeader *pwmClock;
@@ -390,8 +393,9 @@ protected:
 		srcArray = (uint32_t*)srcPage.mem;
 		memset(srcPage.mem, 0, srcPage.size); 
 
-		cbPage = UncachedMemBlock_alloc(BUFFER_COUNT * sizeof(struct DmaControlBlock));
+		cbPage = UncachedMemBlock_alloc(BUFFER_COUNT * 2 * sizeof(struct DmaControlBlock));
 		cbArr = (struct DmaControlBlock*)cbPage.mem;
+		cbArrPadding = ((struct DmaControlBlock*)cbPage.mem) + BUFFER_COUNT;
 
 		for (int i = 0; i < BUFFER_COUNT; i++) {
 			cbArr[i].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_SRC_INC | DMA_CB_TI_WAIT_RESP;
@@ -400,6 +404,13 @@ protected:
 			cbArr[i].TXFR_LEN = BUFFER_BYTES_PER_FRAME;
 			cbArr[i].STRIDE = 0;
 			cbArr[i].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, cbArr+((i+1) % BUFFER_COUNT));
+
+			cbArrPadding[i].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_WAIT_RESP;
+			//cbArr[i].SOURCE_AD will be filled in separately
+			cbArrPadding[i].DEST_AD = PWM_BASE_BUS + PWM_FIF1;
+			//cbArr[i].TXFR_LEN = BUFFER_BYTES_PER_FRAME;
+			cbArr[i].STRIDE = 0;
+			//cbArr[i].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, cbArr+((i+1) % BUFFER_COUNT));
 		}
 
 		printf("Previous DMA header:\n");
@@ -423,6 +434,18 @@ protected:
 		dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES; //high priority (max is 7)
 		dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES | DMA_CS_ACTIVE; //activate DMA. 
 	}
+	inline void advanceCommandBlock(bool didPadding) {
+		if(hadPaddingBefore) {
+			cbArrPadding[previous_cb].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArr[current_frame]);;
+		} else {
+			cbArr[previous_cb].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArr[current_frame]);;
+		}
+		previous_cb = current_frame;
+		current_frame = (current_frame + 1) % BUFFER_COUNT;
+		current_frame_index = 0;
+		frame_processed += 1;
+		hadPaddingBefore = didPadding;
+	}
 	inline void waitForCurrentFrameToEnd() {
 		usleep(dmaHeader->TXFR_LEN * 24 * 1000 / BUFFER_BYTES_PER_FRAME);
 		//usleep(24*1000);
@@ -439,10 +462,12 @@ public:
 	void consumeEncodedHdb3(uint32_t out_p, uint32_t out_m) {
 		static time_t last_info = 0;
 		if (current_frame < 0) {
-			
+			assert(!hadPaddingBefore);
+
 			current_frame = getCurrentDMAFrame();
 			printf("Starting... %d\n", current_frame);
-			cbArr[(BUFFER_COUNT + current_frame - 1) % BUFFER_COUNT].NEXTCONBK = 0;
+			previous_cb = (BUFFER_COUNT + current_frame - 1) % BUFFER_COUNT;
+			cbArr[previous_cb].NEXTCONBK = 0;
 			waitForCurrentFrameToEnd();
 			printf("Frame ended...\n");
 			while(current_frame == getCurrentDMAFrame()) { printf("Need to wait a little longer %d\n", current_frame);}
@@ -461,10 +486,7 @@ public:
 		srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 1] = out_m;
 		current_frame_index += 2;
 		if (current_frame_index >= BUFFER_WORDS_PER_FRAME) {
-			cbArr[(BUFFER_COUNT + current_frame - 1) % BUFFER_COUNT].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArr[current_frame]);;
-			current_frame = (current_frame + 1) % BUFFER_COUNT;
-			current_frame_index = 0;
-			frame_processed += 1;
+			advanceCommandBlock(false);
 		}
 		time_t now = time(0);
 		if ((pwmHeader->STA & (0xF0)) > 0) {
@@ -487,6 +509,24 @@ public:
 				printf("MAX-GAP!\n");
 				stop_program = 1;
 			}
+		}
+	}
+
+	void consumePadding(int repeats, uint32_t padding_out_p, uint32_t padding_out_m) {
+		if (repeats >= 1) {
+			assert(current_frame >= 0);
+			//Each repeat of the padding byte is 2 Bytes.
+			assert(6144 - current_frame_index == repeats * 2);
+			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index] = padding_out_p;
+			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 1] = padding_out_m;
+			cbArrPadding[current_frame].SOURCE_AD = 
+				UncachedMemBlock_to_physical(&srcPage, 
+					((uint8_t*)srcArray) + current_frame * BUFFER_BYTES_PER_FRAME + sizeof(uint32_t) * current_frame_index
+			);
+			//Previous-CB --> [Previous CB Padding] --> This CB --> This CB Padding
+			cbArrPadding[current_frame + BUFFER_COUNT].TXFR_LEN = repeats * sizeof(uint32_t) * 2;
+			cbArr[current_frame].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArrPadding[current_frame]);
+			advanceCommandBlock(true);
 		}
 	}
 

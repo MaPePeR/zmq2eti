@@ -1,4 +1,6 @@
 #include <stdint.h> //for uint32_t
+#include <assert.h>
+#include <stdio.h>
 
 template<typename T>
 class ETIFrameConsumer {
@@ -6,6 +8,7 @@ public:
 	T next;
 
 	void consumeETIFrame(uint8_t *framedata, int frame_length) {
+		assert(frame_length >= 0);
 		int i = 0;
 		while (i < frame_length) {
 			uint8_t b = framedata[i];
@@ -20,17 +23,8 @@ public:
 			next.consumeBit((b & (1 << 0)) > 0);
 			++i;
 		}
-		while (i < 6144) {
-			next.consumeBit((0x55 & (1 << 0)) > 0);
-			next.consumeBit((0x55 & (1 << 1)) > 0);
-			next.consumeBit((0x55 & (1 << 2)) > 0);
-			next.consumeBit((0x55 & (1 << 3)) > 0);
-			
-			next.consumeBit((0x55 & (1 << 4)) > 0);
-			next.consumeBit((0x55 & (1 << 5)) > 0);
-			next.consumeBit((0x55 & (1 << 6)) > 0);
-			next.consumeBit((0x55 & (1 << 7)) > 0);
-			++i;
+		if (frame_length < 6144) {
+			next.consumePaddingBytes(6144 - frame_length);
 		}
 	}
 };
@@ -80,6 +74,22 @@ public:
 			}
 		}
 	}
+	void consumePaddingBytes(int nBytes) {
+		if (nBytes >= 1) {
+			//0x55
+			consumeBit(false);
+			consumeBit(true);
+			consumeBit(false);
+			consumeBit(true);
+
+			consumeBit(false);
+			consumeBit(true);
+			consumeBit(false);
+			consumeBit(true);
+			next.consumePaddingBytes(nBytes - 1, last_one_negative);
+		}
+
+	}
 };
 
 template<typename T>
@@ -105,6 +115,46 @@ public:
 			current_out_m = current_out_p = 0;
 		}
 		
+	}
+
+	void consumePaddingBytes(int nBytes, bool last_one_negative) {
+		assert(count == 0 || count == 8);
+		if (nBytes >= 1) {
+			//Padding is 0x         5         5 
+			//           0b  0 1  0 1  0 1  0 1 
+			//               0 +  0 -  0 +  0 - 
+			//           p: 0001 0000 0001 0000
+			//           m: 0000 0001 0000 0001
+			if (count == 8) {
+				current_out_p <<= 16;
+				current_out_m <<= 16;
+				if (last_one_negative) {
+
+					current_out_p |= 0x1010; //0b0100 0100
+					current_out_m |= 0x0101; //0b0001 0001
+					assert(current_out_p == 0x10101010);
+					assert(current_out_m == 0x01010101);
+				} else{
+					current_out_p |= 0x0101; //0b0001 0001
+					current_out_m |= 0x1010; //0b0100 0100
+					assert(current_out_p == 0x01010101);
+					assert(current_out_m == 0x10101010);
+				}
+				next.consumeEncodedHdb3(current_out_p, current_out_m);
+				count = 0;
+				current_out_m = current_out_p = 0;
+				assert((nBytes - 1) % 2 == 0);
+				next.consumePadding((nBytes - 1)/2, current_out_p, current_out_m);
+			} else {
+				assert(nBytes % 2 == 0);
+				if (last_one_negative) {
+					next.consumePadding(nBytes/2, 0x10101010, 0x01010101);
+				} else {
+					next.consumePadding(nBytes/2, 0x01010101, 0x10101010);
+				}
+			}
+
+		}
 	}
 };
 

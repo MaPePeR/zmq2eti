@@ -120,34 +120,30 @@
 #define PWM_DMAC_DREQ(D) (((D)&0xff)<<0)
 
 //The following is undocumented :( Taken from http://www.scribd.com/doc/127599939/BCM2835-Audio-clocks
-#define CM_GP0CTL 0x70
-#define CM_GP0DIV 0x74
-#define CM_PWMCTL 0xa0
-#define CM_PWMDIV 0xa4
 //each write to CM_PWMTL and CM_PWMDIV requires the password to be written:
-#define CM_PWMCTL_PASSWD 0x5a000000
-#define CM_PWMDIV_PASSWD 0x5a000000
+#define CM_CTL_PASSWD 0x5a000000
+#define CM_DIV_PASSWD 0x5a000000
 //MASH is used to achieve fractional clock dividers by introducing artificial jitter.
 //if you want constant frequency (even if it may not be at 100% CORRECT frequency), use MASH0
 //if clock divisor is integral, then there's no need to use MASH, and anything above MASH1 can introduce jitter.
-#define CM_PWMCTL_MASH(x) (((x)&0x3) << 9)
-#define CM_PWMCTL_MASH0 CM_PWMTRL_MASH(0)
-#define CM_PWMCTL_MASH1 CM_PWMTRL_MASH(1)
-#define CM_PWMCTL_MASH2 CM_PWMTRL_MASH(2)
-#define CM_PWMCTL_MASH3 CM_PWMTRL_MASH(3)
-#define CM_PWMCTL_FLIP (1<<8) //use to inverse clock polarity
-#define CM_PWMCTL_BUSY (1<<7) //read-only flag that indicates clock generator is running.
-#define CM_PWMCTL_KILL (1<<5) //write a 1 to stop & reset clock generator. USED FOR DEBUG ONLY
-#define CM_PWMCTL_ENAB (1<<4) //gracefully stop/start clock generator. BUSY flag will go low once clock is off.
-#define CM_PWMCTL_SRC(x) ((x)&0xf) //clock source. 0=gnd. 1=oscillator. 2-3=debug. 4=PLLA per. 5=PLLC per. 6=PLLD per. 7=HDMI aux. 8-15=GND
-#define CM_PWMCTL_SRC_OSC CM_PWMCTL_SRC(1)
-#define CM_PWMCTL_SRC_PLLA CM_PWMCTL_SRC(4)
-#define CM_PWMCTL_SRC_PLLC CM_PWMCTL_SRC(5)
-#define CM_PWMCTL_SRC_PLLD CM_PWMCTL_SRC(6)
+#define CM_CTL_MASH(x) (((x)&0x3) << 9)
+#define CM_CTL_MASH0 CM_CTL_MASH(0)
+#define CM_CTL_MASH1 CM_CTL_MASH(1)
+#define CM_CTL_MASH2 CM_CTL_MASH(2)
+#define CM_CTL_MASH3 CM_CTL_MASH(3)
+#define CM_CTL_FLIP (1<<8) //use to inverse clock polarity
+#define CM_CTL_BUSY (1<<7) //read-only flag that indicates clock generator is running.
+#define CM_CTL_KILL (1<<5) //write a 1 to stop & reset clock generator. USED FOR DEBUG ONLY
+#define CM_CTL_ENAB (1<<4) //gracefully stop/start clock generator. BUSY flag will go low once clock is off.
+#define CM_CTL_SRC(x) ((x)&0xf) //clock source. 0=gnd. 1=oscillator. 2-3=debug. 4=PLLA per. 5=PLLC per. 6=PLLD per. 7=HDMI aux. 8-15=GND
+#define CM_CTL_SRC_OSC CM_CTL_SRC(1)
+#define CM_CTL_SRC_PLLA CM_CTL_SRC(4)
+#define CM_CTL_SRC_PLLC CM_CTL_SRC(5)
+#define CM_CTL_SRC_PLLD CM_CTL_SRC(6)
 
 //max clock divisor is 4095
-#define CM_PWMDIV_DIVI(x) (((x)&0xfff) << 12)
-#define CM_PWMDIV_DIVF(x) ((x)&0xfff)
+#define CM_DIV_DIVI(x) (((x)&0xfff) << 12)
+#define CM_DIV_DIVF(x) ((x)&0xfff)
 
 struct DmaChannelHeader {
     //Note: dma channels 7-15 are 'LITE' dma engines (or is it 8-15?), with reduced performance & functionality.
@@ -267,4 +263,30 @@ struct PwmHeader {
     volatile uint32_t RNG2; // 0x00000020 //channel 2 range register
     volatile uint32_t DAT2; // 0x00000024 //channel 2 data
         //0-31 PWM_DATi; Stores the 32-bit data to be sent to the PWM controller ONLY WHEN USEFi=1 (FIFO is enabled). TODO: Typo???
+};
+struct ClockManagerClockHeader {
+    volatile uint32_t CTL;
+        //24-31 PASSWD "5a"
+        //11-23 unused
+        //9-10  MASH
+        //8     FLIP
+        //7     BUSY
+        //6     unused
+        //5     KILL
+        //4     ENAB
+        //0-3   SRC; 0: GND, 1=oscillator, 2=testdebug0, 3=testdebug1, 4=PLLA per, 5=PLLC, 6=PLLD, 7=HDMI, 8-15=GND
+    volatile uint32_t DIV;
+        //24-31 PASSWD "5a"
+        //12-23 DIVI Integer part of divisor
+        //11-0  DIVF Fractional part of divisor
+};
+struct ClockManagerHeader {
+    struct ClockManagerClockHeader GP0;
+    struct ClockManagerClockHeader GP1;
+    struct ClockManagerClockHeader GP2;
+    //Unknown:
+    uint32_t unknown[4]; //0x88, 0x8C, 0x90, 0x94
+    //https://de.scribd.com/doc/127599939/BCM2835-Audio-clocks says PCM is 0x98 and PWM 0xA0
+    struct ClockManagerClockHeader PCM;
+    struct ClockManagerClockHeader PWM;
 };

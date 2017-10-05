@@ -513,12 +513,16 @@ public:
 	}
 
 	void consumePadding(int repeats, uint32_t padding_out_p, uint32_t padding_out_m) {
-		if (repeats >= 1) {
+		if (repeats >= 2) {
 			assert(current_frame >= 0);
 			//Each repeat of the padding byte is 2 Bytes.
 			assert(6144 - current_frame_index == repeats * 2);
+			assert(current_frame_index + 4 < 6144);
+			//Prepare for 128-bit-read.
 			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index] = padding_out_p;
 			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 1] = padding_out_m;
+			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 2] = padding_out_p;
+			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 3] = padding_out_m;
 			cbArrPadding[current_frame].SOURCE_AD = 
 				UncachedMemBlock_to_physical(&srcPage, 
 					((uint8_t*)srcArray) + current_frame * BUFFER_BYTES_PER_FRAME + sizeof(uint32_t) * current_frame_index
@@ -527,6 +531,8 @@ public:
 			cbArrPadding[current_frame + BUFFER_COUNT].TXFR_LEN = repeats * sizeof(uint32_t) * 2;
 			cbArr[current_frame].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArrPadding[current_frame]);
 			advanceCommandBlock(true);
+		} else if (repeats == 1) {
+			consumeEncodedHdb3(padding_out_p, padding_out_m);
 		}
 	}
 

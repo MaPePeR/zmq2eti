@@ -234,10 +234,10 @@ int main() {
 	printf("Generating DMA-Commands...\n");
 	usleep(1000);
 
-	cbArr[0].TI = DMA_CB_TI_NO_WIDE_BURSTS;
+	cbArr[0].TI = DMA_CB_TI_NO_WIDE_BURSTS | DMA_CB_TI_SRC_WIDTH;
 	cbArr[0].SOURCE_AD = UncachedMemBlock_to_physical(&srcPage, srcArray);
 	cbArr[0].DEST_AD = UncachedMemBlock_to_physical(&destPage, destArray); //write to the FIFO
-	cbArr[0].TXFR_LEN = DMA_CB_TXFR_LEN_XLENGTH(4*3);
+	cbArr[0].TXFR_LEN = DMA_CB_TXFR_LEN_XLENGTH(4*4*2);
 	cbArr[0].STRIDE = 0;
 	cbArr[0].NEXTCONBK = 0;
 

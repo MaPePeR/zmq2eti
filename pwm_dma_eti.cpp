@@ -266,8 +266,9 @@ public:
 			assert((rc == -1 && errno == EAGAIN) || (rc > 0 && rc <= sizeof(*zmq_msg_buffer)));
 			if (errno == EAGAIN) {
 				errno = 0;
-				buffer_write_pos = (buffer_write_pos + 1) % BUFFER_COUNT;
 				break;
+			} else {
+				buffer_write_pos = (buffer_write_pos + 1) % BUFFER_COUNT;
 			}
 		} while (rc != -1);
 	}

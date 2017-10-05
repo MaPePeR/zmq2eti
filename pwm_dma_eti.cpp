@@ -310,26 +310,6 @@ public:
 
 ZMQReader *zmqreader;
 
-void cleanup() {
-	printf("Cleanup\n");
-	//disable DMA. Otherwise, it will continue to run in the background, potentially overwriting future user data.
-	if(dmaHeader) {
-		printf("Stopping DMA\n");
-		writeBitmasked(&dmaHeader->CS, DMA_CS_ACTIVE, 0);
-		usleep(100);
-		writeBitmasked(&dmaHeader->CS, DMA_CS_RESET, DMA_CS_RESET);
-	}
-	printf("Stopping PWM\n");
-	pwmHeader->CTL = 0;
-}
-
-void cleanupAndExit(int sig) {
-	cleanup();
-	printf("Exiting with error; caught signal: %i\n", sig);
-	exit(1);
-}
-
-
 void logPWMState(uint32_t pwmState) {
 	printf("PWM-STA:");
 	if (pwmState & (1 <<  0)) printf(" FULL1");
@@ -531,6 +511,30 @@ public:
 typedef ETIFrameConsumer<ETIFrameBitConsumer<HDB3TertiaryConsumer<EncodedHDB3WordConsumer>>> EncodingChain;
 
 
+EncodingChain *chain;
+
+void cleanup() {
+	printf("Cleanup\n");
+	delete zmqreader;
+	delete chain;
+	//disable DMA. Otherwise, it will continue to run in the background, potentially overwriting future user data.
+	if(dmaHeader) {
+		printf("Stopping DMA\n");
+		writeBitmasked(&dmaHeader->CS, DMA_CS_ACTIVE, 0);
+		usleep(100);
+		writeBitmasked(&dmaHeader->CS, DMA_CS_RESET, DMA_CS_RESET);
+	}
+	printf("Stopping PWM\n");
+	pwmHeader->CTL = 0;
+}
+
+void cleanupAndExit(int sig) {
+	cleanup();
+	printf("Exiting with error; caught signal: %i\n", sig);
+	exit(1);
+}
+
+
 int main(int argc, const char *argv[]) {
 	//Setup peripherals
 	volatile uint32_t *dmaBaseMem, *pwmBaseMem, *clockBaseMem;
@@ -563,23 +567,23 @@ int main(int argc, const char *argv[]) {
 	cmHeader = (struct ClockManagerHeader*)(clockBaseMem + 0x70/4);
 
 	zmqreader = new ZMQReader(argv[1]);
-	EncodingChain chain;
+	chain = new EncodingChain();
 	
 	zmq_dab_message_t *dab_msg = zmqreader->getNextMessage();
 	while(!stop_program) {
 		int frame_offset = 0;
 		for (int frame = 0; frame < NUM_FRAMES_PER_ZMQ_MESSAGE; frame++) {
-			chain.consumeETIFrame(dab_msg->buf + frame_offset, dab_msg->buflen[frame]);
+			chain->consumeETIFrame(dab_msg->buf + frame_offset, dab_msg->buflen[frame]);
 			frame_offset += dab_msg->buflen[frame];
 		}
 		dab_msg = zmqreader->getNextMessage();
 
 	}
 	delete zmqreader;
+	delete chain;
 
 	printf("Cleanup...\n");
 	pwmHeader->CTL = 0;
-	
 
 	cleanup();
 

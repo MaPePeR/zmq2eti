@@ -38,7 +38,6 @@
 #define RPI_V2
 #include "hw-addresses.h"
 #include "pwm_dma_eti_sys.h"
-#include "hdb3.h"
 #include "odr-dabOutput.h"
 
 #include "hdb3encodechain.hpp"
@@ -222,107 +221,96 @@ void logDmaControlBlock(struct DmaControlBlock *b) {
 	printf("Dma Control Block:\n TI: 0x%08x\n SOURCE_AD: 0x%08x\n DEST_AD: 0x%08x\n TXFR_LEN: 0x%08x\n STRIDE: 0x%08x\n NEXTCONBK: 0x%08x\n unused: 0x%08x %08x\n", b->TI, b->SOURCE_AD, b->DEST_AD, b->TXFR_LEN, b->STRIDE, b->NEXTCONBK, b->_reserved[0], b->_reserved[1]);
 }
 
-void *zmq_ctx;
-void *zmq_sock;
-zmq_dab_message_t zmq_msg_buffer[ZMQ_MESSAGE_BUFFER_SIZE];
-int zmq_msg_buffer_count = 0;
-int zmq_msg_buffer_pos = 0;
-volatile int stop_zmq_message_thread = 0;
-const char *zmq_endpoint;
-
-std::deque<zmq_dab_message_t *> empty_buffers;
-std::deque<zmq_dab_message_t *> filled_buffers;
-pthread_t zmq_read_thread;
-pthread_mutex_t zmq_buffer_mutex;
-pthread_cond_t zmq_buffer_done_with_message;
-pthread_cond_t zmq_buffer_new_message_recieved;
-
-zmq_dab_message_t * get_next_read_buffer(bool holdingBuffer) {
-    pthread_mutex_lock(&zmq_buffer_mutex);
-
-    if (holdingBuffer) {
-    	empty_buffers.push_back(filled_buffers.front());
-    	filled_buffers.pop_front();
-    	pthread_cond_signal(&zmq_buffer_done_with_message);
-    }
-
-    while (filled_buffers.empty()) {
-        pthread_cond_wait(&zmq_buffer_new_message_recieved, &zmq_buffer_mutex);
-    }
-    zmq_dab_message_t * output = filled_buffers.front();
-    pthread_mutex_unlock(&zmq_buffer_mutex);
-    return output;
-}
-
-void *read_zmq_messages_thread(void *arg) {
-	pthread_mutex_lock(&zmq_buffer_mutex);
-	for (int i = 0; i < ZMQ_MESSAGE_BUFFER_SIZE; i++) {
-		empty_buffers.push_back(&zmq_msg_buffer[i]);
-	}
-	pthread_mutex_unlock(&zmq_buffer_mutex);
-
-	zmq_ctx = zmq_init(1);
-	if (!zmq_ctx) {
-		fprintf(stderr, "%s\n", "Error initializing zmq_ctx.");
-		exit(1);
-	}
-	zmq_sock = zmq_socket(zmq_ctx, ZMQ_SUB);
-	if (!zmq_sock) {
-		fprintf(stderr, "%s\n", "Error creating zmq_socket.");
-		exit(1);
-	}
-	if (zmq_connect(zmq_sock, zmq_endpoint) < 0) {
-		fprintf(stderr, "Failed to connect to zmq-endpoint %s\n", zmq_endpoint);
-		exit(1);
-	}
-	int rc = zmq_setsockopt (zmq_sock, ZMQ_SUBSCRIBE, "", 0);
-	assert (rc == 0);
-
-	pthread_mutex_lock(&zmq_buffer_mutex);
-	for (int i = 0; i < ZMQ_MESSAGE_BUFFER_SIZE / 2 && !stop_zmq_message_thread; i++) {
-		zmq_dab_message_t * output = empty_buffers.front();
-		empty_buffers.pop_front();
-		int rc = zmq_recv(zmq_sock, output, sizeof(*zmq_msg_buffer), 0);
-		assert(rc > 0 && rc <= sizeof(*zmq_msg_buffer));
-		filled_buffers.push_back(output);
-	}
-	pthread_mutex_unlock(&zmq_buffer_mutex);
+volatile int stop_program = 0;
 
 
-	while(!stop_zmq_message_thread) {
-		zmq_dab_message_t * output;
-		pthread_mutex_lock(&zmq_buffer_mutex);
-		while(empty_buffers.empty()) {
-			pthread_cond_wait(&zmq_buffer_done_with_message, &zmq_buffer_mutex);
+class ZMQReader {
+	static constexpr int BUFFER_COUNT = 40;
+	const char *zmq_endpoint;
+	void *zmq_ctx;
+	void *zmq_sock;
+	zmq_dab_message_t zmq_msg_buffer[BUFFER_COUNT];
+	int buffer_read_pos = 0;
+	int buffer_write_pos = -1;
+public:
+	ZMQReader(const char *zmq_endpoint_) : zmq_endpoint(zmq_endpoint_) {
+		zmq_ctx = zmq_init(1);
+		if (!zmq_ctx) {
+			fprintf(stderr, "%s\n", "Error initializing zmq_ctx.");
+			exit(1);
 		}
-		output = empty_buffers.front();
-		pthread_mutex_unlock(&zmq_buffer_mutex);
-		if (stop_zmq_message_thread) break;
+		zmq_sock = zmq_socket(zmq_ctx, ZMQ_SUB);
+		if (!zmq_sock) {
+			fprintf(stderr, "%s\n", "Error creating zmq_socket.");
+			exit(1);
+		}
+		if (zmq_connect(zmq_sock, zmq_endpoint) < 0) {
+			fprintf(stderr, "Failed to connect to zmq-endpoint %s\n", zmq_endpoint);
+			exit(1);
+		}
+		int rc = zmq_setsockopt (zmq_sock, ZMQ_SUBSCRIBE, "", 0);
+		assert (rc == 0);
+	}
 
-		int rc = zmq_recv(zmq_sock, output, sizeof(*zmq_msg_buffer), 0);
-		assert(rc > 0 && rc <= sizeof(*zmq_msg_buffer));
+	inline int bufferSize() {
+		return (BUFFER_COUNT + buffer_write_pos - buffer_read_pos) % BUFFER_COUNT;
+	}
 
-		pthread_mutex_lock(&zmq_buffer_mutex);
-			zmq_dab_message_t * output2 = empty_buffers.front();
-			empty_buffers.pop_front();
-			assert(output == output2);
-			filled_buffers.push_back(output);
-			pthread_cond_signal(&zmq_buffer_new_message_recieved);
-		pthread_mutex_unlock(&zmq_buffer_mutex);
+	inline void tryReceive() {
+		int rc;
+		do {
+			if (buffer_write_pos == (BUFFER_COUNT + buffer_read_pos - 1) % BUFFER_COUNT) {
+				return;
+			}
+			rc = zmq_recv(zmq_sock, &zmq_msg_buffer[buffer_write_pos], sizeof(*zmq_msg_buffer), ZMQ_NOBLOCK);
+			assert((rc == -1 && errno == EAGAIN) || (rc > 0 && rc <= sizeof(*zmq_msg_buffer)));
+			if (errno == EAGAIN) {
+				errno = 0;
+				buffer_write_pos = (buffer_write_pos + 1) % BUFFER_COUNT;
+				break;
+			}
+		} while (rc != -1);
 	}
-	if (zmq_sock) {
-		printf("Closing ZMQ-Socket\n");
-		zmq_close(zmq_sock);
+
+	zmq_dab_message_t *getNextMessage() {
+		if (buffer_write_pos < 0) {
+			//Prebuffering
+			for (buffer_write_pos = 0; buffer_write_pos < BUFFER_COUNT / 2; buffer_write_pos++) {
+				int rc = zmq_recv(zmq_sock, &zmq_msg_buffer[buffer_write_pos], sizeof(*zmq_msg_buffer), 0);
+				assert(rc > 0 && rc <= sizeof(*zmq_msg_buffer));
+			}
+		}
+		if (buffer_read_pos == buffer_write_pos) {
+			//Buffer is empty :(
+			zmq_dab_message_t *output = &zmq_msg_buffer[buffer_write_pos];
+			int rc = zmq_recv(zmq_sock, output, sizeof(*zmq_msg_buffer), 0);
+			assert(rc > 0 && rc <= sizeof(*zmq_msg_buffer));
+			buffer_write_pos = (buffer_write_pos + 1) % BUFFER_COUNT;
+			buffer_read_pos = (buffer_read_pos + 1) % BUFFER_COUNT;
+			return output;
+		} else {
+			tryReceive();
+			zmq_dab_message_t *output = &zmq_msg_buffer[buffer_read_pos];
+			buffer_read_pos = (buffer_read_pos + 1) % BUFFER_COUNT;
+			return output;
+		}
 	}
-	if (zmq_ctx) {
-		printf("Terminating ZMQ-Context\n");
-		zmq_term(zmq_ctx);
+
+	~ZMQReader() {
+		if (zmq_sock) {
+			printf("Closing ZMQ-Socket\n");
+			zmq_close(zmq_sock);
+		}
+		if (zmq_ctx) {
+			printf("Terminating ZMQ-Context\n");
+			zmq_term(zmq_ctx);
+		}
 	}
-	return NULL;
-}
+};
+
+ZMQReader *zmqreader;
 
 void cleanup() {
-	stop_zmq_message_thread = 1;
 	printf("Cleanup\n");
 	//disable DMA. Otherwise, it will continue to run in the background, potentially overwriting future user data.
 	if(dmaHeader) {
@@ -333,12 +321,6 @@ void cleanup() {
 	}
 	printf("Stopping PWM\n");
 	pwmHeader->CTL = 0;
-
-	pthread_mutex_lock(&zmq_buffer_mutex);
-	pthread_cond_signal(&zmq_buffer_done_with_message);
-	pthread_mutex_unlock(&zmq_buffer_mutex);
-	pthread_join(zmq_read_thread, NULL); // will wait forever
-	//could also disable PWM, but that's not imperative.
 }
 
 void cleanupAndExit(int sig) {
@@ -372,7 +354,7 @@ protected:
 	uint64_t gap_counter = 0;
 	int current_frame = -1;
 	int current_frame_index;
-	static constexpr int BUFFER_COUNT = 4;
+	static constexpr int BUFFER_COUNT = 40;
 	static constexpr int ETI_FRAME_SIZE = 6144;
 	time_t start_time;
 	//We encode the bits at double the frequency and have 2 channels, so each ETI-Frame is encoded to 4 times its size in bytes.
@@ -488,6 +470,7 @@ public:
 			cbArr[current_frame].NEXTCONBK = 0;
 		} else if (current_frame == getCurrentDMAFrame()) {
 			assert(current_frame_index == 0);
+			zmqreader->tryReceive();
 			waitForCurrentFrameToEnd();
 			while(current_frame == getCurrentDMAFrame()) {printf("Need to wait a little longer2\n");}
 			current_frame_index = 0;
@@ -512,9 +495,16 @@ public:
 
 		if (last_info != now) {
 			last_info = now;
-			printf("Runtime: %ld. %20.3f B/s gaps: %llu\n", last_info - start_time, frame_processed * 6144.0 / (last_info - start_time), gap_counter);
+			printf("Runtime: %7lds %20.3f B/s gaps: %llu buffer: %dms zmq: %dx4\n", 
+				last_info - start_time, 
+				frame_processed * 6144.0 / (last_info - start_time), 
+				gap_counter,
+				((BUFFER_COUNT + current_frame - getCurrentDMAFrame()) % BUFFER_COUNT ) * 24 + dmaHeader->TXFR_LEN * 24 / BUFFER_BYTES_PER_FRAME,
+				zmqreader->bufferSize()
+				);
 			if (dmaHeader->CONBLK_AD == 0 || dmaHeader->NEXTCONBK == 0) {
 				printf("MAX-GAP!\n");
+				stop_program = 1;
 			}
 		}
 	}
@@ -553,10 +543,7 @@ int main(int argc, const char *argv[]) {
 	}
 	setSchedPriority(SCHED_PRIORITY);
 	assert(argc == 2);
-	zmq_endpoint = argv[1];
 
-	printf("Starting read thread...");
-	pthread_create(&zmq_read_thread, NULL, read_zmq_messages_thread, NULL);
 	//First, open the linux device, /dev/mem
 	//dev/mem provides access to the physical memory of the entire processor+ram
 	//This is needed because Linux uses virtual memory, thus the process's memory at 0x00000000 will NOT have the same contents as the physical memory at 0x00000000
@@ -575,19 +562,20 @@ int main(int argc, const char *argv[]) {
 	clockBaseMem = mapPeripheral(memfd, CLOCK_BASE);
 	cmHeader = (struct ClockManagerHeader*)(clockBaseMem + 0x70/4);
 
-
+	zmqreader = new ZMQReader(argv[1]);
 	EncodingChain chain;
 	
-	zmq_dab_message_t *dab_msg = get_next_read_buffer(false);
-	while(1) {
+	zmq_dab_message_t *dab_msg = zmqreader->getNextMessage();
+	while(!stop_program) {
 		int frame_offset = 0;
 		for (int frame = 0; frame < NUM_FRAMES_PER_ZMQ_MESSAGE; frame++) {
 			chain.consumeETIFrame(dab_msg->buf + frame_offset, dab_msg->buflen[frame]);
 			frame_offset += dab_msg->buflen[frame];
 		}
-		dab_msg = get_next_read_buffer(true);
+		dab_msg = zmqreader->getNextMessage();
 
 	}
+	delete zmqreader;
 
 	printf("Cleanup...\n");
 	pwmHeader->CTL = 0;

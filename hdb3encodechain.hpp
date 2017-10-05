@@ -9,15 +9,15 @@ public:
 		int i = 0;
 		while (i < frame_length) {
 			uint8_t b = framedata[i];
-			next.consumeBit((b & (1 << 0)) > 0);
-			next.consumeBit((b & (1 << 1)) > 0);
-			next.consumeBit((b & (1 << 2)) > 0);
-			next.consumeBit((b & (1 << 3)) > 0);
-			
-			next.consumeBit((b & (1 << 4)) > 0);
-			next.consumeBit((b & (1 << 5)) > 0);
-			next.consumeBit((b & (1 << 6)) > 0);
 			next.consumeBit((b & (1 << 7)) > 0);
+			next.consumeBit((b & (1 << 6)) > 0);
+			next.consumeBit((b & (1 << 5)) > 0);
+			next.consumeBit((b & (1 << 4)) > 0);
+		
+			next.consumeBit((b & (1 << 3)) > 0);
+			next.consumeBit((b & (1 << 2)) > 0);
+			next.consumeBit((b & (1 << 1)) > 0);
+			next.consumeBit((b & (1 << 0)) > 0);
 			++i;
 		}
 		while (i < 6144) {

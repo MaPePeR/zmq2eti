@@ -533,7 +533,7 @@ public:
 					((uint8_t*)srcArray) + current_frame * BUFFER_BYTES_PER_FRAME + sizeof(uint32_t) * current_frame_index
 			);
 			//Previous-CB --> [Previous CB Padding] --> This CB --> This CB Padding
-			cbArrPadding[current_frame + BUFFER_COUNT].TXFR_LEN = repeats * sizeof(uint32_t) * 2;
+			cbArrPadding[current_frame].TXFR_LEN = repeats * sizeof(uint32_t) * 2;
 			//This CB is not the full length
 			cbArr[current_frame].TXFR_LEN = current_frame_index * sizeof(uint32_t) * 2;
 			cbArr[current_frame].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArrPadding[current_frame]);

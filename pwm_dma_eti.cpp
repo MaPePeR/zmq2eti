@@ -436,8 +436,10 @@ protected:
 	}
 	inline void advanceCommandBlock(bool didPadding) {
 		if(hadPaddingBefore) {
+			assert(cbArrPadding[previous_cb].NEXTCONBK == 0);
 			cbArrPadding[previous_cb].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArr[current_frame]);;
 		} else {
+			assert(cbArr[previous_cb].NEXTCONBK == 0);
 			cbArr[previous_cb].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArr[current_frame]);;
 		}
 		previous_cb = current_frame;
@@ -451,7 +453,7 @@ protected:
 		//usleep(24*1000);
 	}
 	inline int getCurrentDMAFrame() {
-		return (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(struct DmaControlBlock);
+		return ((dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(struct DmaControlBlock)) % BUFFER_COUNT;
 	}
 public:
 	EncodedHDB3WordConsumer()  {
@@ -475,6 +477,7 @@ public:
 			current_frame_index = 0;
 			cbArr[current_frame].NEXTCONBK = 0;
 		} else if (current_frame == getCurrentDMAFrame()) {
+			//Need to wait until we can write into this DMA-Block
 			assert(current_frame_index == 0);
 			zmqreader->tryReceive();
 			waitForCurrentFrameToEnd();
@@ -486,6 +489,8 @@ public:
 		srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 1] = out_m;
 		current_frame_index += 2;
 		if (current_frame_index >= BUFFER_WORDS_PER_FRAME) {
+			cbArr[current_frame].NEXTCONBK = 0;
+			//Full size frame without padding
 			advanceCommandBlock(false);
 		}
 		time_t now = time(0);
@@ -517,7 +522,7 @@ public:
 			assert(current_frame >= 0);
 			//Each repeat of the padding byte is 2 Bytes.
 			assert(6144 - current_frame_index == repeats * 2);
-			assert(current_frame_index + 4 < 6144);
+			assert(current_frame_index + 4 < BUFFER_WORDS_PER_FRAME);
 			//Prepare for 128-bit-read.
 			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index] = padding_out_p;
 			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 1] = padding_out_m;
@@ -529,7 +534,10 @@ public:
 			);
 			//Previous-CB --> [Previous CB Padding] --> This CB --> This CB Padding
 			cbArrPadding[current_frame + BUFFER_COUNT].TXFR_LEN = repeats * sizeof(uint32_t) * 2;
+			//This CB is not the full length
+			cbArr[current_frame].TXFR_LEN = current_frame_index * sizeof(uint32_t) * 2;
 			cbArr[current_frame].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArrPadding[current_frame]);
+			cbArrPadding[current_frame].NEXTCONBK = 0;
 			advanceCommandBlock(true);
 		} else if (repeats == 1) {
 			consumeEncodedHdb3(padding_out_p, padding_out_m);
@@ -539,6 +547,7 @@ public:
 	~EncodedHDB3WordConsumer() {
 		for(int i = 0; i < BUFFER_COUNT; i++) {
 			cbArr[i].NEXTCONBK = 0;
+			cbArrPadding[i].NEXTCONBK = 0;
 		}
 		dmaHeader->NEXTCONBK = 0;
 		dmaHeader->CS |= DMA_CS_ABORT;
@@ -626,8 +635,6 @@ int main(int argc, const char *argv[]) {
 		dab_msg = zmqreader->getNextMessage();
 
 	}
-	delete zmqreader;
-	delete chain;
 
 	printf("Cleanup...\n");
 	pwmHeader->CTL = 0;

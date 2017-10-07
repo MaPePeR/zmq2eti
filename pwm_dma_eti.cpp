@@ -449,8 +449,8 @@ protected:
 		hadPaddingBefore = didPadding;
 	}
 	inline void waitForCurrentFrameToEnd() {
-		usleep(dmaHeader->TXFR_LEN * 24 * 1000 / BUFFER_BYTES_PER_FRAME);
-		//usleep(24*1000);
+		//usleep(dmaHeader->TXFR_LEN * 24 * 1000 / BUFFER_BYTES_PER_FRAME);
+		usleep(24 * 1000 * 2);
 	}
 	inline int getCurrentDMAFrame() {
 		return ((dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(struct DmaControlBlock)) % BUFFER_COUNT;

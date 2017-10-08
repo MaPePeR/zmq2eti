@@ -21,7 +21,7 @@
 //  0 1
 //0 0 +
 //1 - ?
-#include <time.h>
+#include <sys/time.h>
 #include <sys/mman.h> //for mmap
 #include <stdio.h>
 #include <signal.h> //for sigaction
@@ -398,6 +398,7 @@ void logPWMState(uint32_t pwmState) {
 class EncodedHDB3WordConsumer {
 protected:
 	uint64_t frame_processed = 0;
+	uint64_t frame_send = 0;
 	uint64_t gap_counter = 0;
 	int previous_cb;
 	bool hadPaddingBefore = false;
@@ -405,7 +406,9 @@ protected:
 	int current_frame_index;
 	static constexpr int BUFFER_COUNT = 40;
 	static constexpr int ETI_FRAME_SIZE = 6144;
-	time_t start_time;
+
+	int last_frame = 0;
+	struct timeval start_time;
 	//We encode the bits at double the frequency and have 2 channels, so each ETI-Frame is encoded to 4 times its size in bytes.
 	//So each 2 bytes in the eti frame will be encoded to 2 uint32_t
 	static constexpr size_t BUFFER_BYTES_PER_FRAME = ETI_FRAME_SIZE * 2 * 2;
@@ -528,7 +531,7 @@ public:
 		setupDMA();
 	}
 	void consumeEncodedHdb3(uint32_t out_p, uint32_t out_m) {
-		static time_t last_info = 0;
+		static struct timeval last_info;
 		if (current_frame < 0) {
 			assert(!hadPaddingBefore);
 
@@ -539,7 +542,8 @@ public:
 			waitForCurrentFrameToEnd();
 			printf("Frame ended...\n");
 			while(current_frame == getCurrentDMAFrame()) { printf("Need to wait a little longer %d\n", current_frame);}
-			start_time = time(0);
+			gettimeofday(&start_time, NULL);
+			last_frame = getCurrentDMAFrame();
 			current_frame_index = 0;
 			cbArr[current_frame].NEXTCONBK = 0;
 		} else if (current_frame == getCurrentDMAFrame()) {
@@ -551,6 +555,11 @@ public:
 			current_frame_index = 0;
 			cbArr[current_frame].NEXTCONBK = 0;
 		}
+		int dma_frame = getCurrentDMAFrame();
+		if (last_frame != dma_frame) {
+			frame_send += (BUFFER_COUNT + dma_frame - last_frame) % BUFFER_COUNT;
+			last_frame = dma_frame;
+		}
 		srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index] = out_p;
 		srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 1] = out_m;
 		current_frame_index += 2;
@@ -559,7 +568,9 @@ public:
 			//Full size frame without padding
 			advanceCommandBlock(false);
 		}
-		time_t now = time(0);
+		struct timeval now;
+		gettimeofday(&now, NULL);
+		//time_t now = time(0);
 		if ((pwmHeader->STA & (0xF0)) > 0) {
 			//printf("GAP!!! %d\n", (pwmHeader->STA & (0xF0)) >> 4);
 			pwmHeader->STA = 0xF0;
@@ -567,11 +578,13 @@ public:
 			//last_gap = now;
 		}
 
-		if (last_info != now) {
+		if (last_info.tv_sec != now.tv_sec) {
+			double diff = (now.tv_sec - start_time.tv_sec) + (now.tv_usec - start_time.tv_usec) / 1000000.0;
 			last_info = now;
-			printf("Runtime: %7lds %20.3f B/s gaps: %llu buffer: %dms zmq: %dx4\n", 
-				last_info - start_time, 
-				frame_processed * 6144.0 / (last_info - start_time), 
+			printf("Runtime: %7lds E: %10.3lfB/s S: %10.3lf  gaps: %llu buffer: %dms zmq: %dx4\n", 
+				(long)diff, 
+				frame_processed * 6144.0/ (diff), 
+				frame_send * 6144.0 / (diff),
 				gap_counter,
 				((BUFFER_COUNT + current_frame - getCurrentDMAFrame()) % BUFFER_COUNT ) * 24 + dmaHeader->TXFR_LEN * 24 / BUFFER_BYTES_PER_FRAME,
 				zmqreader->bufferSize()

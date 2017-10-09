@@ -244,6 +244,9 @@ public:
 			fprintf(stderr, "%s\n", "Error creating zmq_socket.");
 			exit(1);
 		}
+		int val = 2;
+		int rc = zmq_setsockopt(zmq_sock_inproc_main, ZMQ_RCVHWM, &val, sizeof(int));
+		assert (rc == 0);
 		if (zmq_bind(zmq_sock_inproc_main, "inproc://#1") < 0) {
 			fprintf(stderr, "%s\n", "Failed to connect to inproc.");
 			exit(1);
@@ -273,58 +276,27 @@ public:
 			fprintf(stderr, "%s\n", "Error creating zmq_socket.");
 			exit(1);
 		}
+
+		int val = 2;
+		rc = zmq_setsockopt(zmq_sock_inproc_thread, ZMQ_SNDHWM, &val, sizeof(int));
+		assert (rc == 0);
+
 		if (zmq_connect(zmq_sock_inproc_thread, "inproc://#1") < 0) {
 			fprintf(stderr, "%s\n", "Failed to connect to inproc.");
 			exit(1);
 		}
+
 
 		if (buffer_write_pos < 0) {
 			//Prebuffering
 			struct timeval start_time;
 			uint64_t frames = 0;
 			gettimeofday(&start_time, NULL);
-			for (buffer_write_pos = 0; buffer_write_pos < BUFFER_COUNT - 2; buffer_write_pos++) {
+			for (buffer_write_pos = 0; buffer_write_pos < BUFFER_COUNT / 2; buffer_write_pos++) {
 				int rc = zmq_recv(zmq_sock_odr_sub, &zmq_msg_buffer[buffer_write_pos], sizeof(*zmq_msg_buffer), 0);
 				assert(rc > 0 && rc <= sizeof(*zmq_msg_buffer));
 				frames += NUM_FRAMES_PER_ZMQ_MESSAGE;
 			}
-
-			printf("Waiting for Network speed to settle...\n");
-			struct timeval now;
-			time_t last_info = 0;
-			double avg_speed;
-			int count = 0;
-			do {
-				int rc = zmq_recv(zmq_sock_odr_sub, &zmq_msg_buffer[buffer_write_pos], sizeof(*zmq_msg_buffer), 0);
-				if (rc < 0) {
-					return;
-				}
-				frames += NUM_FRAMES_PER_ZMQ_MESSAGE;
-				buffer_write_pos = (buffer_write_pos + 1) % BUFFER_COUNT;
-				buffer_read_pos = (buffer_read_pos + 1) % BUFFER_COUNT;
-				gettimeofday(&now, NULL);
-				avg_speed = frames * 6144.0 / (now.tv_sec - start_time.tv_sec + (now.tv_usec - start_time.tv_usec) / 1000000);
-				if (last_info != now.tv_sec) {
-					last_info = now.tv_sec;
-					printf("Avg Speed: %10.3lf\n", avg_speed);
-				}
-				if (avg_speed > 256000) {
-					count += 1;
-					if (count == 5) {
-						break;
-					}
-				}
-			} while (keep_running);
-
-			for (int i = 0; i < BUFFER_COUNT && keep_running; i++) {
-				int rc = zmq_recv(zmq_sock_odr_sub, &zmq_msg_buffer[buffer_write_pos], sizeof(*zmq_msg_buffer), 0);
-				if (rc < 0) return;
-				assert(rc > 0 && rc <= sizeof(*zmq_msg_buffer));
-				buffer_write_pos = (buffer_write_pos + 1) % BUFFER_COUNT;
-				buffer_read_pos = (buffer_read_pos + 1) % BUFFER_COUNT;
-				frames += NUM_FRAMES_PER_ZMQ_MESSAGE;
-			}
-
 		}
 		printf("Prebuffering done... Have %d Messages\n", bufferSize());
 

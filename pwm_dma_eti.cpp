@@ -624,12 +624,15 @@ public:
 				UncachedMemBlock_to_physical(&srcPage, 
 					((uint8_t*)srcArray) + current_frame * BUFFER_BYTES_PER_FRAME + sizeof(uint32_t) * current_frame_index
 			);
+
+			cbArrPadding[current_frame].NEXTCONBK = 0;
 			//Previous-CB --> [Previous CB Padding] --> This CB --> This CB Padding
 			cbArrPadding[current_frame].TXFR_LEN = repeats * sizeof(uint32_t) * 2;
 			//This CB is not the full length
-			cbArr[current_frame].TXFR_LEN = current_frame_index * sizeof(uint32_t) * 2;
+			cbArr[current_frame].TXFR_LEN = current_frame_index * sizeof(uint32_t);
+			assert(cbArr[current_frame].TXFR_LEN + cbArrPadding[current_frame].TXFR_LEN == 6144 * 4);
+
 			cbArr[current_frame].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArrPadding[current_frame]);
-			cbArrPadding[current_frame].NEXTCONBK = 0;
 			advanceCommandBlock(true);
 		} else if (repeats == 1) {
 			consumeEncodedHdb3(padding_out_p, padding_out_m);

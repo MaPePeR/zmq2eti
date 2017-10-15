@@ -142,9 +142,9 @@ public:
 				}
 				next.consumeEncodedHdb3(current_out_p, current_out_m);
 				count = 0;
-				current_out_m = current_out_p = 0;
 				assert((nBytes - 1) % 2 == 0);
 				next.consumePadding((nBytes - 1)/2, current_out_p, current_out_m);
+				current_out_m = current_out_p = 0;
 			} else {
 				assert(nBytes % 2 == 0);
 				if (last_one_negative) {

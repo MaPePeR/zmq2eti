@@ -49,8 +49,10 @@
 #define SCHED_PRIORITY 30 //Linux scheduler priority. Higher = more realtime
 
 #define DMA_CHANNEL (5)
-#define CLOCK_DIVI (122)
-#define CLOCK_DIVF (72)
+//#define CLOCK_DIVI (122)
+//#define CLOCK_DIVF (80)
+int CLOCK_DIVI = 122;
+int CLOCK_DIVF = 72;
 #define BUFFER_SECONDS (15)
 //We output 2 * 2048 Bits per second onto 2 channels at 32 bit per command
 #define BUFFER_COMMANDS (BUFFER_SECONDS * 2048 * 2 * 2 / 32)
@@ -702,7 +704,13 @@ int main(int argc, const char *argv[]) {
 		sigaction(i, &sa, NULL);
 	}
 	setSchedPriority(SCHED_PRIORITY);
-	assert(argc == 2);
+	assert(argc == 4);
+
+	CLOCK_DIVI = atoi(argv[2]);
+	CLOCK_DIVF = atoi(argv[3]);
+
+	printf("Clock: %10.4lf\n", (500000000.0 / (CLOCK_DIVI + CLOCK_DIVF/1024.0)));
+	printf("Rate:  %10.4lf\n", (500000000.0 / (CLOCK_DIVI + CLOCK_DIVF/1024.0) / 16));
 
 	zmq_ctx = zmq_init(1);
 	if (!zmq_ctx) {

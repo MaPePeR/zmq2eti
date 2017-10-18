@@ -141,6 +141,7 @@
 #define CM_CTL_SRC_PLLA CM_CTL_SRC(4)
 #define CM_CTL_SRC_PLLC CM_CTL_SRC(5)
 #define CM_CTL_SRC_PLLD CM_CTL_SRC(6)
+#define CM_CTL_SRC_HDMI CM_CTL_SRC(7)
 
 //max clock divisor is 4095
 #define CM_DIV_DIVI(x) (((x)&0xfff) << 12)

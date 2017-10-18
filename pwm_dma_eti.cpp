@@ -22,7 +22,7 @@
 //0 0 +
 //1 - ?
 #include <sys/time.h>
-#include <sys/mman.h> //for mmap
+//#include <sys/mman.h> //for mmap
 #include <stdio.h>
 #include <signal.h> //for sigaction
 #include <stdlib.h> //for exit, valloc
@@ -42,6 +42,7 @@
 #include "odr-dabOutput.h"
 
 #include "hdb3encodechain.hpp"
+#include "uncached_memblock.h"
 /************/
 /* Settings */
 /************/
@@ -62,81 +63,7 @@ int CLOCK_DIVF = 72;
 #define SLEEP_TIME (BUFFER_SECONDS / 3)
 
 
-/*************************/
-extern "C"
-{
-	#include "mailbox.h"
-}
-// ---- Memory mappping defines
-#define BUS_TO_PHYS(x) ((x)&~0xC0000000)
 
-// ---- Memory allocating defines
-// https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface
-#define MEM_FLAG_DIRECT           (1 << 2)
-#define MEM_FLAG_COHERENT         (2 << 2)
-#define MEM_FLAG_L1_NONALLOCATING (MEM_FLAG_DIRECT | MEM_FLAG_COHERENT)
-
-// A memory block that represents memory that is allocated in physical
-// memory and locked there so that it is not swapped out.
-// It is not backed by any L1 or L2 cache, so writing to it will directly
-// modify the physical memory (and it is slower of course to do so).
-// This is memory needed with DMA applications so that we can write through
-// with the CPU and have the DMA controller 'see' the data.
-// The UncachedMemBlock_{alloc,free,to_physical}
-// functions are meant to operate on these.
-struct UncachedMemBlock {
-  void *mem;                  // User visible value: the memory to use.
-  //-- Internal representation.
-  uint32_t bus_addr;
-  uint32_t mem_handle;
-  size_t size;
-};
-
-static int mbox_fd = -1;   // used internally by the UncachedMemBlock-functions.
-
-// Allocate a block of memory of the given size (which is rounded up to the next
-// full page). The memory will be aligned on a page boundary and zeroed out.
-static struct UncachedMemBlock UncachedMemBlock_alloc(size_t size) {
-  if (mbox_fd < 0) {
-	mbox_fd = mbox_open();
-	assert(mbox_fd >= 0);  // Uh, /dev/vcio not there ?
-  }
-  // Round up to next full page.
-  size = size % PAGE_SIZE == 0 ? size : (size + PAGE_SIZE) & ~(PAGE_SIZE - 1);
-
-  struct UncachedMemBlock result;
-  result.size = size;
-  result.mem_handle = mem_alloc(mbox_fd, size, PAGE_SIZE,
-								MEM_FLAG_L1_NONALLOCATING);
-  result.bus_addr = mem_lock(mbox_fd, result.mem_handle);
-  result.mem = mapmem(BUS_TO_PHYS(result.bus_addr), size);
-  fprintf(stderr, "Alloc: %6d bytes;  %p (bus=0x%08x, phys=0x%08x)\n",
-		  (int)size, result.mem, result.bus_addr, BUS_TO_PHYS(result.bus_addr));
-  assert(result.bus_addr);  // otherwise: couldn't allocate contiguous block.
-  memset(result.mem, 0x00, size);
-
-  return result;
-}
-
-// Free block previously allocated with UncachedMemBlock_alloc()
-static void UncachedMemBlock_free(struct UncachedMemBlock *block) {
-  if (block->mem == NULL) return;
-  assert(mbox_fd >= 0);  // someone should've initialized that on allocate.
-  unmapmem(block->mem, block->size);
-  mem_unlock(mbox_fd, block->mem_handle);
-  mem_free(mbox_fd, block->mem_handle);
-  block->mem = NULL;
-}
-
-
-// Given a pointer to memory that is in the allocated block, return the
-// physical bus addresse needed by DMA operations.
-static uintptr_t UncachedMemBlock_to_physical(const struct UncachedMemBlock *blk,
-											  void *p) {
-	uint32_t offset = (uint8_t*)p - (uint8_t*)blk->mem;
-	assert(offset < blk->size);   // pointer not within our block.
-	return blk->bus_addr + offset;
-}
 
 //map a physical address into our virtual address space. memfd is the file descriptor for /dev/mem
 volatile uint32_t* mapPeripheral(int memfd, int addr) {
@@ -429,9 +356,9 @@ protected:
 	static constexpr size_t BUFFER_BYTES_PER_FRAME = ETI_FRAME_SIZE * 2 * 2;
 	static constexpr size_t BUFFER_WORDS_PER_FRAME = ETI_FRAME_SIZE;
 
-	struct UncachedMemBlock srcPage;
+	UncachedMemBlock srcPage;
 	uint32_t *srcArray;
-	struct UncachedMemBlock cbPage;
+	UncachedMemBlock cbPage;
 	struct DmaControlBlock *cbArr;
 	struct DmaControlBlock *cbArrPadding;
 
@@ -473,28 +400,26 @@ protected:
 		SET_GPIO_ALT(13,0); //GPIO13 = PIN33
 	}
 	void setupDMA() {
-		srcPage = UncachedMemBlock_alloc(BUFFER_COUNT * BUFFER_BYTES_PER_FRAME);
 		srcArray = (uint32_t*)srcPage.mem;
 		memset(srcPage.mem, 0, srcPage.size); 
 
-		cbPage = UncachedMemBlock_alloc(BUFFER_COUNT * 2 * sizeof(struct DmaControlBlock));
 		cbArr = (struct DmaControlBlock*)cbPage.mem;
 		cbArrPadding = ((struct DmaControlBlock*)cbPage.mem) + BUFFER_COUNT;
 
 		for (int i = 0; i < BUFFER_COUNT; i++) {
 			cbArr[i].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_SRC_INC | DMA_CB_TI_WAIT_RESP;
-			cbArr[i].SOURCE_AD = UncachedMemBlock_to_physical(&srcPage, ((uint8_t*)srcArray) + i * BUFFER_BYTES_PER_FRAME);
+			cbArr[i].SOURCE_AD = srcPage.to_physical(((uint8_t*)srcArray) + i * BUFFER_BYTES_PER_FRAME);
 			cbArr[i].DEST_AD = PWM_BASE_BUS + PWM_FIF1; //write to the FIFO
 			cbArr[i].TXFR_LEN = BUFFER_BYTES_PER_FRAME;
 			cbArr[i].STRIDE = 0;
-			cbArr[i].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, cbArr+((i+1) % BUFFER_COUNT));
+			cbArr[i].NEXTCONBK = cbPage.to_physical(cbArr+((i+1) % BUFFER_COUNT));
 
 			cbArrPadding[i].TI = DMA_CB_TI_PERMAP_PWM | DMA_CB_TI_DEST_DREQ | DMA_CB_TI_WAIT_RESP;
 			//cbArr[i].SOURCE_AD will be filled in separately
 			cbArrPadding[i].DEST_AD = PWM_BASE_BUS + PWM_FIF1;
 			//cbArr[i].TXFR_LEN = BUFFER_BYTES_PER_FRAME;
 			cbArr[i].STRIDE = 0;
-			//cbArr[i].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, cbArr+((i+1) % BUFFER_COUNT));
+			//cbArr[i].NEXTCONBK = cbPage.to_physical(cbArr+((i+1) % BUFFER_COUNT));
 		}
 
 		printf("Previous DMA header:\n");
@@ -512,7 +437,7 @@ protected:
 		usleep(100);
 
 		dmaHeader->DEBUG = DMA_DEBUG_READ_ERROR | DMA_DEBUG_FIFO_ERROR | DMA_DEBUG_READ_LAST_NOT_SET_ERROR; // clear debug error flags
-		uint32_t firstAddr = UncachedMemBlock_to_physical(&cbPage, cbArr);
+		uint32_t firstAddr = cbPage.to_physical(cbArr);
 		printf("starting DMA @ CONBLK_AD=0x%08x\n", firstAddr);
 		dmaHeader->CONBLK_AD = firstAddr; //(uint32_t)physCbPage + ((void*)cbArr - virtCbPage); //we have to point it to the PHYSICAL address of the control block (cb1)
 		dmaHeader->CS = DMA_CS_PRIORITY(7) | DMA_CS_PANIC_PRIORITY(15) | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES; //high priority (max is 7)
@@ -521,10 +446,10 @@ protected:
 	inline void advanceCommandBlock(bool didPadding) {
 		if(hadPaddingBefore) {
 			assert(cbArrPadding[previous_cb].NEXTCONBK == 0);
-			cbArrPadding[previous_cb].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArr[current_frame]);;
+			cbArrPadding[previous_cb].NEXTCONBK = cbPage.to_physical(&cbArr[current_frame]);;
 		} else {
 			assert(cbArr[previous_cb].NEXTCONBK == 0);
-			cbArr[previous_cb].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArr[current_frame]);;
+			cbArr[previous_cb].NEXTCONBK = cbPage.to_physical(&cbArr[current_frame]);;
 		}
 		previous_cb = current_frame;
 		current_frame = (current_frame + 1) % BUFFER_COUNT;
@@ -540,7 +465,7 @@ protected:
 		return ((dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(struct DmaControlBlock)) % BUFFER_COUNT;
 	}
 public:
-	EncodedHDB3WordConsumer()  {
+	EncodedHDB3WordConsumer() : srcPage(BUFFER_COUNT * BUFFER_BYTES_PER_FRAME), cbPage(BUFFER_COUNT * 2 * sizeof(struct DmaControlBlock)) {
 		setupClock();
 		setupPWM();
 		setupDMA();
@@ -623,7 +548,7 @@ public:
 			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 2] = padding_out_p;
 			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 3] = padding_out_m;
 			cbArrPadding[current_frame].SOURCE_AD = 
-				UncachedMemBlock_to_physical(&srcPage, 
+				srcPage.to_physical( 
 					((uint8_t*)srcArray) + current_frame * BUFFER_BYTES_PER_FRAME + sizeof(uint32_t) * current_frame_index
 			);
 
@@ -634,7 +559,7 @@ public:
 			cbArr[current_frame].TXFR_LEN = current_frame_index * sizeof(uint32_t);
 			assert(cbArr[current_frame].TXFR_LEN + cbArrPadding[current_frame].TXFR_LEN == 6144 * 4);
 
-			cbArr[current_frame].NEXTCONBK = UncachedMemBlock_to_physical(&cbPage, &cbArrPadding[current_frame]);
+			cbArr[current_frame].NEXTCONBK = cbPage.to_physical(&cbArrPadding[current_frame]);
 			advanceCommandBlock(true);
 		} else if (repeats == 1) {
 			consumeEncodedHdb3(padding_out_p, padding_out_m);
@@ -655,9 +580,6 @@ public:
 		pwmHeader->CTL = 0;
 		pwmClock->CTL = CM_CTL_PASSWD | ((pwmClock->CTL)&(~CM_CTL_ENAB)); //disable clock
 		do {} while (pwmClock->CTL & CM_CTL_BUSY); //wait for clock to deactivate
-
-		UncachedMemBlock_free(&srcPage);
-		UncachedMemBlock_free(&cbPage);
 	}
 };
 

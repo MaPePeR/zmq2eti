@@ -54,15 +54,6 @@
 //#define CLOCK_DIVF (80)
 int CLOCK_DIVI = 122;
 int CLOCK_DIVF = 72;
-#define BUFFER_SECONDS (15)
-//We output 2 * 2048 Bits per second onto 2 channels at 32 bit per command
-#define BUFFER_COMMANDS (BUFFER_SECONDS * 2048 * 2 * 2 / 32)
-//One ETI-Frame lasts for 24*10**-3 Seconds, so this is approx the amount of ZNQ-Messages for a full buffer of BUFFER_SECONDS-seconds.
-#define ZMQ_MESSAGE_BUFFER_SIZE (BUFFER_SECONDS * 1000 / (24 * NUM_FRAMES_PER_ZMQ_MESSAGE))
-
-#define SLEEP_TIME (BUFFER_SECONDS / 3)
-
-
 
 
 //map a physical address into our virtual address space. memfd is the file descriptor for /dev/mem

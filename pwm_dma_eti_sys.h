@@ -71,6 +71,7 @@
 //... (more found on page 61 of BCM2835 pdf
 #define DMA_CB_TI_PERMAP_PWM  (5<<16)
 //...
+#define DMA_CB_TI_SRC_IGNORE  (1<<11)
 #define DMA_CB_TI_SRC_DREQ    (1<<10)
 #define DMA_CB_TI_SRC_WIDTH   (1<<9)
 #define DMA_CB_TI_SRC_INC     (1<<8)

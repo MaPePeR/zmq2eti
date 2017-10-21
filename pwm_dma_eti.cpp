@@ -330,7 +330,7 @@ public:
 		srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index] = out_p;
 		srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 1] = out_m;
 		current_frame_index += 2;
-		if (current_frame_index >= BUFFER_WORDS_PER_FRAME) {
+		if (current_frame_index >= 0 && (unsigned)current_frame_index >= BUFFER_WORDS_PER_FRAME) {
 			cbArr[current_frame].NEXTCONBK = 0;
 			//Full size frame without padding
 			advanceCommandBlock(false);
@@ -368,7 +368,7 @@ public:
 			assert(current_frame >= 0);
 			//Each repeat of the padding byte is 2 Bytes.
 			assert(6144 - current_frame_index == repeats * 2);
-			assert(current_frame_index + 4 < BUFFER_WORDS_PER_FRAME);
+			assert(current_frame_index >= 0 && (unsigned)current_frame_index + 4 < BUFFER_WORDS_PER_FRAME);
 			//Prepare for 128-bit-read.
 			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index] = padding_out_p;
 			srcArray[current_frame * BUFFER_WORDS_PER_FRAME + current_frame_index + 1] = padding_out_m;

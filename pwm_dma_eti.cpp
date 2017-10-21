@@ -456,9 +456,6 @@ int main(int argc, const char *argv[]) {
 	setSchedPriority(SCHED_PRIORITY);
 	assert(argc == 2);
 
-	printf("Clock: %10.4lf\n", (500000000.0 / (CLOCK_DIVI + CLOCK_DIVF/1024.0)));
-	printf("Rate:  %10.4lf\n", (500000000.0 / (CLOCK_DIVI + CLOCK_DIVF/1024.0) / 16));
-
 	zmq_ctx = zmq_init(1);
 	if (!zmq_ctx) {
 		fprintf(stderr, "%s\n", "Error initializing zmq_ctx.");

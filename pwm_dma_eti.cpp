@@ -50,10 +50,8 @@
 #define SCHED_PRIORITY 30 //Linux scheduler priority. Higher = more realtime
 
 #define DMA_CHANNEL (5)
-//#define CLOCK_DIVI (122)
-//#define CLOCK_DIVF (80)
-int CLOCK_DIVI = 122;
-int CLOCK_DIVF = 72;
+#define CLOCK_DIVI (122)
+#define CLOCK_DIVF (288)
 
 
 //map a physical address into our virtual address space. memfd is the file descriptor for /dev/mem
@@ -456,10 +454,7 @@ int main(int argc, const char *argv[]) {
 		sigaction(i, &sa, NULL);
 	}
 	setSchedPriority(SCHED_PRIORITY);
-	assert(argc == 4);
-
-	CLOCK_DIVI = atoi(argv[2]);
-	CLOCK_DIVF = atoi(argv[3]);
+	assert(argc == 2);
 
 	printf("Clock: %10.4lf\n", (500000000.0 / (CLOCK_DIVI + CLOCK_DIVF/1024.0)));
 	printf("Rate:  %10.4lf\n", (500000000.0 / (CLOCK_DIVI + CLOCK_DIVF/1024.0) / 16));

@@ -289,7 +289,9 @@ protected:
 		usleep(24 * 1000 * 2);
 	}
 	inline int getCurrentDMAFrame() {
-		return ((dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(struct DmaControlBlock)) % BUFFER_COUNT;
+		uint32_t dma_pos = (dmaHeader->CONBLK_AD - cbPage.bus_addr) / sizeof(struct DmaControlBlock);
+		assert(dma_pos < 2 * BUFFER_COUNT && dma_pos >= 0);
+		return (dma_pos % BUFFER_COUNT);
 	}
 public:
 	EncodedHDB3WordConsumer() : srcPage(BUFFER_COUNT * BUFFER_BYTES_PER_FRAME), cbPage(BUFFER_COUNT * 2 * sizeof(struct DmaControlBlock)) {
@@ -318,7 +320,11 @@ public:
 			assert(current_frame_index == 0);
 			zmqreader->tryReceive();
 			waitForCurrentFrameToEnd();
-			while(current_frame == getCurrentDMAFrame()) {printf("Need to wait a little longer2\n");}
+			if (current_frame == getCurrentDMAFrame()) {
+				logDmaChannelHeader(dmaHeader);
+				printf("Need to wait a little longer2: %d\n", current_frame);
+				while(current_frame == getCurrentDMAFrame()) {usleep(100);}
+			}
 			current_frame_index = 0;
 			cbArr[current_frame].NEXTCONBK = 0;
 		}

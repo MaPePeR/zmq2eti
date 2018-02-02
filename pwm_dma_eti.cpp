@@ -53,6 +53,8 @@
 #define CLOCK_DIVI (122)
 #define CLOCK_DIVF (288)
 
+#define STATUS_GPIO (27)
+
 
 //map a physical address into our virtual address space. memfd is the file descriptor for /dev/mem
 volatile uint32_t* mapPeripheral(int memfd, int addr) {
@@ -424,6 +426,8 @@ EncodingChain *chain;
 void cleanup() {
 	printf("Cleanup\n");
 	stop_program = 1;
+	GPIO_CLR = 1<<STATUS_GPIO;
+
 	zmqreader->keep_running = false;
 	delete zmqreader;
 	if (zmq_ctx) {
@@ -488,6 +492,13 @@ int main(int argc, const char *argv[]) {
 
 	zmqreader = new ZMQReader(zmq_ctx, argv[1]);
 	chain = new EncodingChain();
+
+	INP_GPIO(STATUS_GPIO);
+	OUT_GPIO(STATUS_GPIO);
+	GPIO_CLR = 1<<STATUS_GPIO;
+
+	int frame_count = 0;
+	bool blink_status = 0;
 	
 	zmq_dab_message_t *dab_msg = zmqreader->getNextMessage();
 	while(!stop_program) {
@@ -495,10 +506,24 @@ int main(int argc, const char *argv[]) {
 		for (int frame = 0; frame < NUM_FRAMES_PER_ZMQ_MESSAGE; frame++) {
 			chain->consumeETIFrame(dab_msg->buf + frame_offset, dab_msg->buflen[frame]);
 			frame_offset += dab_msg->buflen[frame];
+			frame_count += 1;
+			if (frame_count >= 42) {
+				frame_count = 0;
+				if (blink_status) {
+					GPIO_CLR = 1<<STATUS_GPIO;
+					blink_status = false;
+				} else {
+					GPIO_SET = 1<<STATUS_GPIO;
+					blink_status = true;
+				}
+			}
 		}
 		dab_msg = zmqreader->getNextMessage();
 
 	}
+
+	GPIO_CLR = 1<<STATUS_GPIO;
+
 
 	printf("Cleanup...\n");
 	pwmHeader->CTL = 0;

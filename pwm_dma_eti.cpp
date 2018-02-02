@@ -49,7 +49,7 @@
 
 #define SCHED_PRIORITY 30 //Linux scheduler priority. Higher = more realtime
 
-#define DMA_CHANNEL (5)
+#define DMA_CHANNEL (6)
 #define CLOCK_DIVI (122)
 #define CLOCK_DIVF (288)
 
@@ -430,6 +430,7 @@ void cleanup() {
 
 	zmqreader->keep_running = false;
 	delete zmqreader;
+
 	if (zmq_ctx) {
 		printf("Terminating ZMQ-Context\n");
 		zmq_term(zmq_ctx);

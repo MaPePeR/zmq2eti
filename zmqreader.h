@@ -65,30 +65,37 @@ public:
 			exit(1);
 		}
 
-
+		zmq_pollitem_t poll[2];
+		int poll_rc = 1;
+		poll[0].socket = zmq_sock_odr_sub;
+		poll[0].fd = 0;
+		poll[0].events = ZMQ_POLLIN;
+		poll[0].revents = 0;
 		if (buffer_write_pos < 0) {
 			//Prebuffering
 			struct timeval start_time;
 			uint64_t frames = 0;
 			gettimeofday(&start_time, NULL);
 			for (buffer_write_pos = 0; buffer_write_pos < BUFFER_COUNT / 2 && keep_running; buffer_write_pos++) {
-				int rc = zmq_recv(zmq_sock_odr_sub, &zmq_msg_buffer[buffer_write_pos], sizeof(*zmq_msg_buffer), 0);
-				assert(rc > 0 && (size_t)rc <= sizeof(*zmq_msg_buffer));
-				frames += NUM_FRAMES_PER_ZMQ_MESSAGE;
+				while ((poll_rc = zmq_poll (poll, 1, 500)) == 0 && keep_running) {
+				}
+					
+				if (poll_rc > 0 && (poll[0].revents & ZMQ_POLLIN)) {
+					poll[0].revents = 0;
+					int rc = zmq_recv(zmq_sock_odr_sub, &zmq_msg_buffer[buffer_write_pos], sizeof(*zmq_msg_buffer), 0);
+					assert(rc > 0 && (size_t)rc <= sizeof(*zmq_msg_buffer));
+					frames += NUM_FRAMES_PER_ZMQ_MESSAGE;
+				}
 			}
 		}
 		printf("Prebuffering done... Have %d Messages\n", bufferSize());
 
-		zmq_pollitem_t poll[2];
-		poll[0].socket = zmq_sock_odr_sub;
-		poll[0].fd = 0;
-		poll[0].events = ZMQ_POLLIN;
-		poll[0].revents = 0;
+		
+
 		poll[1].socket = zmq_sock_inproc_thread;
 		poll[1].fd = 0;
 		poll[1].events = ZMQ_POLLOUT;
 		poll[1].revents = 0;
-		int poll_rc = 1;
 		while(poll_rc >= 0 && keep_running) {
 			poll_rc = zmq_poll (poll, 2, 500);
 			if (poll_rc > 0) {

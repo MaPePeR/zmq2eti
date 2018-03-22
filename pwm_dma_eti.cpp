@@ -455,6 +455,10 @@ void cleanupAndExit(int sig) {
 
 
 int main(int argc, const char *argv[]) {
+	if (argc != 2) {
+		fprintf(stderr, "Missing Argument.\nUsage: %s [ZMQ-Endpoint]\n", argv[0]);
+		return 1;
+	}
 	//Setup peripherals
 	volatile uint32_t *dmaBaseMem, *pwmBaseMem, *clockBaseMem;
 	//emergency clean-up:
